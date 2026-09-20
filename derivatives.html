@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>STG 持倉與資金費率圖</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.8/dist/lightweight-charts.standalone.production.js" integrity="sha384-8J8e9bGIwf7e9BLO5rwf4zJwNRKcypGnvuGzORD/t4TrFA1gWbl3Hsi/RvyWwBKl" crossorigin="anonymous"></script>
+<style>
+  :root { --bg:#131722; --panel:#1e222d; --line:#2a2e39; --text:#d1d4dc; --dim:#787b86; --up:#26a69a; --down:#ef5350; --gold:#f0b90b; --blue:#2962ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:-apple-system,"PingFang TC","Helvetica Neue",Arial,sans-serif; font-size:13px; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  .bar { display:flex; align-items:center; gap:14px; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .grp { display:flex; gap:2px; flex-wrap:wrap; }
+  button { background:transparent; color:var(--text); border:0; padding:5px 9px; border-radius:4px; cursor:pointer; font-size:13px; }
+  button:hover { background:var(--line); }
+  button.on { background:var(--blue); color:#fff; }
+  .cards { display:flex; gap:22px; margin-left:auto; flex-wrap:wrap; }
+  .card .k { color:var(--dim); font-size:11px; }
+  .card .v { font-size:15px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .card .s { color:var(--dim); font-size:11px; font-variant-numeric:tabular-nums; }
+  .up { color:var(--up); } .down { color:var(--down); } .gold { color:var(--gold); }
+  #wrap { position:relative; flex:1; min-height:0; }
+  #chart { position:absolute; inset:0; }
+  #legend { position:absolute; left:10px; top:8px; z-index:5; font-size:12px; line-height:1.6; pointer-events:none;
+    background:rgba(19,23,34,.8); padding:4px 8px; border-radius:4px; font-variant-numeric:tabular-nums; }
+  .foot { display:flex; gap:18px; padding:5px 12px; background:var(--panel); border-top:1px solid var(--line); color:var(--dim); font-size:12px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#f0b90b; margin-right:5px; }
+  .dot.ok { background:var(--up); } .dot.bad { background:var(--down); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="bar">
+    <div class="grp" id="pers"></div>
+    <div class="cards">
+      <div class="card"><div class="k">現貨相對合約溢價</div><div class="v" id="cBs">-</div><div class="s" id="cBsS"> </div></div>
+      <div class="card"><div class="k">持倉量（顆）</div><div class="v" id="cOi">-</div><div class="s" id="cOiS"> </div></div>
+      <div class="card"><div class="k">全市場多空帳戶比</div><div class="v" id="cGls">-</div><div class="s" id="cGlsS"> </div></div>
+      <div class="card"><div class="k">大戶持倉多空比</div><div class="v" id="cTlp">-</div><div class="s" id="cTlpS"> </div></div>
+      <div class="card"><div class="k">主動買賣量比</div><div class="v" id="cTk">-</div><div class="s" id="cTkS"> </div></div>
+      <div class="card"><div class="k">資金費率（下次）</div><div class="v" id="cFr">-</div><div class="s" id="cFrS"> </div></div>
+    </div>
+  </div>
+  <div id="wrap"><div id="chart"></div><div id="legend"></div></div>
+  <div class="foot">
+    <span><span class="dot" id="dot"></span>幣安合約資料</span>
+    <span id="fUpd">-</span>
+    <span>資料來自幣安公開接口，比幣安前端多；接口只保留最近約 30 天。多空比大於 1 代表多方較多。時間為 UTC+8</span>
+  </div>
+</div>
+
+<script>
+const PERIODS = ["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"];
+const SHIFT = 8 * 3600;
+const F = "https://fapi.binance.com";
+const $ = (id) => document.getElementById(id);
+const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } };
+const getJ = async (p) => { const r = await fetch(F + p); if (!r.ok) throw new Error(p + " " + r.status); return r.json(); };
+const SPOT = ["https://api.binance.com", "https://data-api.binance.vision"];
+const getSpot = async (p) => {   // 現貨主站被擋時退到行情鏡像
+  let err;
+  for (const h of SPOT) { try { const r = await fetch(h + p); if (!r.ok) throw new Error(p + " " + r.status); return await r.json(); } catch (e) { err = e; } }
+  throw err;
+};
+let period = store("dp") || "5m";
+if (!PERIODS.includes(period)) period = "5m";
+const dbg = { counts: {} };     // 測試用：各序列筆數
+
+// ---------- 圖表 ----------
+const chart = LightweightCharts.createChart($("chart"), {
+  autoSize: true,
+  layout: { background: { color: "#131722" }, textColor: "#d1d4dc", panes: { separatorColor: "#2a2e39" } },
+  grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
+  timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#2a2e39" },
+  rightPriceScale: { borderColor: "#2a2e39" },
+});
+const line = (color, title, pane, fmt, extra) => chart.addSeries(LightweightCharts.LineSeries,
+  Object.assign({ color, lineWidth: 2, title, priceFormat: fmt || { type: "price", precision: 2, minMove: 0.01 } }, extra || {}), pane);
+const priceS = line("#8ab4f8", "價格", 0, { type: "price", precision: 5, minMove: 0.00001 });
+const basisS = line("#ffb74d", "現貨/合約溢價", 1, { type: "custom", formatter: (v) => (v >= 0 ? "+" : "") + v.toFixed(3) + "%", minMove: 0.001 });
+const oiS = line("#f0b90b", "持倉量", 2, { type: "custom", formatter: (v) => (v / 1e6).toFixed(2) + "M", minMove: 1 });
+const glsS = line("#26a69a", "全市場帳戶", 3, { type: "price", precision: 3, minMove: 0.001 });
+const tlaS = line("#8ab4f8", "大戶帳戶", 3, { type: "price", precision: 3, minMove: 0.001 });
+const tlpS = line("#ef5350", "大戶持倉", 3, { type: "price", precision: 3, minMove: 0.001 });
+const tkS = line("#c792ea", "主動買賣比", 4, { type: "price", precision: 3, minMove: 0.001 });
+const frS = chart.addSeries(LightweightCharts.HistogramSeries, { title: "資金費率", priceFormat: { type: "custom", formatter: (v) => v.toFixed(4) + "%", minMove: 0.0001 } }, 5);
+basisS.createPriceLine({ price: 0, color: "#787b86", lineWidth: 1, lineStyle: 2, title: "0" });
+glsS.createPriceLine({ price: 1, color: "#787b86", lineWidth: 1, lineStyle: 2, title: "1.0" });
+tkS.createPriceLine({ price: 1, color: "#787b86", lineWidth: 1, lineStyle: 2, title: "1.0" });
+function layoutPanes() {           // 價格 3 份，其餘各 1 到 1.4 份
+  try { const p = chart.panes(), w = [3, 1.3, 1.2, 1.5, 0.9, 0.9]; w.forEach((x, i) => p[i] && p[i].setStretchFactor(x)); } catch (e) { console.warn("[warn] 版面比例", e); }
+}
+layoutPanes();
+
+// ---------- 資料 ----------
+let data = {};
+const conv = (arr, tKey, vFn) => {
+  const out = [], seen = new Set();
+  for (const r of arr || []) { const t = Math.floor(+r[tKey] / 1000) + SHIFT; if (seen.has(t)) continue; seen.add(t); const v = vFn(r); if (Number.isFinite(v)) out.push({ time: t, value: v }); }
+  return out.sort((a, b) => a.time - b.time);
+};
+const ok = (r) => (r.status === "fulfilled" ? r.value : null);
+
+async function loadAll(first) {
+  const per = period;
+  const req = [
+    getJ(`/fapi/v1/klines?symbol=STGUSDT&interval=${per}&limit=500`),
+    getJ(`/futures/data/openInterestHist?symbol=STGUSDT&period=${per}&limit=500`),
+    getJ(`/futures/data/globalLongShortAccountRatio?symbol=STGUSDT&period=${per}&limit=500`),
+    getJ(`/futures/data/topLongShortAccountRatio?symbol=STGUSDT&period=${per}&limit=500`),
+    getJ(`/futures/data/topLongShortPositionRatio?symbol=STGUSDT&period=${per}&limit=500`),
+    getJ(`/futures/data/takerlongshortRatio?symbol=STGUSDT&period=${per}&limit=500`),
+    getJ(`/fapi/v1/fundingRate?symbol=STGUSDT&limit=1000`),
+    getJ(`/fapi/v1/premiumIndex?symbol=STGUSDT`),
+    getSpot(`/api/v3/klines?symbol=STGUSDT&interval=${per}&limit=500`),
+  ];
+  const res = (await Promise.allSettled(req)).map(ok);
+  if (per !== period) return;                              // 讀取期間切換了週期，丟掉舊結果
+  const [kl, oi, gls, tla, tlp, tk, fr, pi, sp] = res;
+  data = {
+    price: conv(kl, 0, (r) => +r[4]),
+    oi: conv(oi, "timestamp", (r) => +r.sumOpenInterest),
+    gls: conv(gls, "timestamp", (r) => +r.longShortRatio),
+    tla: conv(tla, "timestamp", (r) => +r.longShortRatio),
+    tlp: conv(tlp, "timestamp", (r) => +r.longShortRatio),
+    tk: conv(tk, "timestamp", (r) => +r.buySellRatio),
+    fr: conv(fr, "fundingTime", (r) => +r.fundingRate * 100),
+    pi,
+  };
+  const spm = new Map((sp || []).map((r) => [Math.floor(+r[0] / 1000) + SHIFT, +r[4]]));   // 現貨收盤價，與合約同週期同開盤時間
+  data.basis = data.price.filter((x) => spm.has(x.time)).map((x) => ({ time: x.time, value: (spm.get(x.time) / x.value - 1) * 100 }));
+  basisS.setData(data.basis);
+  const t0 = data.price.length ? data.price[0].time : 0;
+  data.fr = data.fr.filter((x) => x.time >= t0 - 6 * 3600);
+  priceS.setData(data.price); oiS.setData(data.oi); glsS.setData(data.gls); tlaS.setData(data.tla); tlpS.setData(data.tlp); tkS.setData(data.tk);
+  frS.setData(data.fr.map((x) => ({ time: x.time, value: x.value, color: x.value >= 0 ? "#26a69a" : "#ef5350" })));
+  for (const k of Object.keys(data)) if (Array.isArray(data[k])) dbg.counts[k] = data[k].length;
+  if (first) { layoutPanes(); try { chart.timeScale().fitContent(); } catch (e) {} }
+  $("dot").className = "dot " + (res.filter(Boolean).length >= 8 ? "ok" : "bad");
+  $("fUpd").textContent = "最後更新 " + new Date().toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour12: false }) + "，每 30 秒自動刷新";
+  refreshCards();
+}
+
+const last = (a) => (a && a.length ? a[a.length - 1] : null);
+const back = (a, secs) => { if (!a || !a.length) return null; const t = a[a.length - 1].time - secs; let b = null; for (const x of a) { if (x.time <= t) b = x; else break; } return b; };
+const pct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+function refreshCards() {
+  const oi = last(data.oi), oi24 = back(data.oi, 86400);
+  if (oi) { $("cOi").textContent = (oi.value / 1e6).toFixed(3) + "M"; $("cOiS").textContent = oi24 ? "24 小時 " + pct((oi.value / oi24.value - 1) * 100) : "資料不足 24 小時"; }
+  const g = last(data.gls); if (g) { $("cGls").textContent = g.value.toFixed(3); $("cGls").className = "v " + (g.value >= 1 ? "up" : "down"); const g24 = back(data.gls, 86400); $("cGlsS").textContent = g24 ? "24 小時前 " + g24.value.toFixed(3) : " "; }
+  const p = last(data.tlp); if (p) { $("cTlp").textContent = p.value.toFixed(3); $("cTlp").className = "v " + (p.value >= 1 ? "up" : "down"); const a = last(data.tla); $("cTlpS").textContent = a ? "大戶帳戶 " + a.value.toFixed(3) : " "; }
+  const k = last(data.tk); if (k) { $("cTk").textContent = k.value.toFixed(3); $("cTk").className = "v " + (k.value >= 1 ? "up" : "down"); }
+  if (data.pi) {
+    const r = +data.pi.lastFundingRate * 100;
+    $("cFr").textContent = r.toFixed(4) + "%"; $("cFr").className = "v " + (r >= 0 ? "up" : "down");
+    const ms = data.pi.nextFundingTime - Date.now(), h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    $("cFrS").textContent = ms > 0 ? `${h} 小時 ${m} 分後結算` : "結算中";
+  }
+}
+
+// 頂部卡片：現貨與合約最新成交價，每 5 秒更新一次
+async function pollBasis() {
+  try {
+    const [s, p] = await Promise.all([getSpot(`/api/v3/ticker/price?symbol=STGUSDT`), getJ(`/fapi/v1/ticker/price?symbol=STGUSDT`)]);
+    const sp = +s.price, pp = +p.price, b = (sp / pp - 1) * 100;
+    $("cBs").textContent = pct3(b); $("cBs").className = "v " + (b >= 0 ? "up" : "down");
+    $("cBsS").textContent = `現貨 ${sp.toFixed(5)} / 合約 ${pp.toFixed(5)}`;
+  } catch (e) { console.warn("[warn] 現貨合約價差", e); }
+}
+const pct3 = (n) => (n >= 0 ? "+" : "") + n.toFixed(3) + "%";
+
+// ---------- 控制與圖例 ----------
+function buildBar() {
+  $("pers").innerHTML = "";
+  for (const p of PERIODS) {
+    const b = document.createElement("button"); b.textContent = p; b.className = p === period ? "on" : "";
+    b.onclick = () => { period = p; store("dp", p); buildBar(); loadAll(true); };
+    $("pers").appendChild(b);
+  }
+}
+const nearest = (a, t) => { let b = null; for (const x of a || []) { if (x.time <= t) b = x; else break; } return b; };
+chart.subscribeCrosshairMove((p) => {
+  if (!p.time) { $("legend").innerHTML = ""; return; }
+  const f = (a, d) => { const x = nearest(a, p.time); return x ? x.value.toFixed(d) : "-"; };
+  const oi = nearest(data.oi, p.time);
+  $("legend").innerHTML =
+    `價格 ${f(data.price, 5)}　<span class="gold">現貨/合約 ${f(data.basis, 3)}%</span>　持倉 ${oi ? (oi.value / 1e6).toFixed(3) + "M" : "-"}<br>` +
+    `<span class="up">全市場 ${f(data.gls, 3)}</span>　<span style="color:#8ab4f8">大戶帳戶 ${f(data.tla, 3)}</span>　<span class="down">大戶持倉 ${f(data.tlp, 3)}</span>　` +
+    `<span style="color:#c792ea">主動買賣 ${f(data.tk, 3)}</span>　<span class="gold">費率 ${f(data.fr, 4)}%</span>`;
+});
+
+buildBar();
+loadAll(true);
+pollBasis();
+setInterval(pollBasis, 5000);
+setInterval(() => loadAll(false), 30000);
+setInterval(refreshCards, 30000);
+</script>
+</body>
+</html>

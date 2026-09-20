@@ -1,11 +1,13 @@
 # stg-premium-chart
 
-Two static web pages that track the STG token against its fixed ZRO conversion ratio of 1 STG = 0.08634 ZRO, using Binance public market data. There is no backend and no API key. The browser calls Binance directly, so the charts keep updating while the tab is open.
+Three static web pages that track the STG token against its fixed ZRO conversion ratio of 1 STG = 0.08634 ZRO, using Binance public market data. There is no backend and no API key. The browser calls Binance directly, so the charts keep updating while the tab is open.
 
 ## Pages
 
 - `index.html`: premium candles of STG over its fair value, which is 0.08634 times the ZRO spot price, with a price panel below. Choose Binance spot or the USDT-M perpetual, and 1s, 1m, 5m, 15m or 1h candles. Binance has no 1s candles for the perpetual, so that option is disabled there.
 - `settlement.html`: settlement price calculator for the Binance STGUSDT perpetual delisting. Binance's delisting FAQ defines the settlement price as the average of the per-second index price over the last 30 minutes, 1,800 samples in total. The page draws the index price and a rolling 30-minute average. Inside the window it also draws a running average and a projected settlement price.
+
+- `derivatives.html`: positioning charts for the STGUSDT perpetual. Panels for price, the spot premium over the perpetual, open interest, three long/short ratios, the taker buy/sell ratio and the funding rate. It refreshes every 30 seconds. Binance keeps this data for about 30 days.
 
 ## Use
 
