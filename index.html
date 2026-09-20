@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>STG 即時價差圖</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.8/dist/lightweight-charts.standalone.production.js" integrity="sha384-8J8e9bGIwf7e9BLO5rwf4zJwNRKcypGnvuGzORD/t4TrFA1gWbl3Hsi/RvyWwBKl" crossorigin="anonymous"></script>
+<style>
+  :root { --bg:#131722; --panel:#1e222d; --line:#2a2e39; --text:#d1d4dc; --dim:#787b86; --up:#26a69a; --down:#ef5350; --blue:#2962ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:-apple-system,"PingFang TC","Helvetica Neue",Arial,sans-serif; font-size:13px; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  .bar { display:flex; align-items:center; gap:14px; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .grp { display:flex; gap:2px; }
+  button { background:transparent; color:var(--text); border:0; padding:5px 9px; border-radius:4px; cursor:pointer; font-size:13px; }
+  button:hover { background:var(--line); }
+  button.on { background:var(--blue); color:#fff; }
+  button:disabled { color:#4a4e5a; cursor:not-allowed; background:transparent; }
+  .stat { display:flex; gap:16px; margin-left:auto; align-items:baseline; flex-wrap:wrap; }
+  .stat span b { font-variant-numeric:tabular-nums; margin-left:4px; }
+  .dim { color:var(--dim); }
+  #prem { font-size:20px; font-weight:600; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  #wrap { position:relative; flex:1; min-height:0; }
+  #chart { position:absolute; inset:0; }
+  #legend { position:absolute; left:10px; top:8px; z-index:5; font-size:12px; line-height:1.6; pointer-events:none;
+    background:rgba(19,23,34,.75); padding:4px 8px; border-radius:4px; font-variant-numeric:tabular-nums; }
+  .foot { display:flex; gap:18px; padding:5px 12px; background:var(--panel); border-top:1px solid var(--line); color:var(--dim); font-size:12px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#f0b90b; margin-right:5px; }
+  .dot.ok { background:var(--up); } .dot.bad { background:var(--down); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="bar">
+    <div class="grp" id="ivs"></div>
+    <div class="grp" id="srcs">
+      <button data-src="spot" class="on">STG 現貨</button>
+      <button data-src="perp">STG 合約</button>
+    </div>
+    <div class="stat">
+      <span class="dim">STG<b id="sStg">-</b></span>
+      <span class="dim">ZRO<b id="sZro">-</b></span>
+      <span class="dim">合理價<b id="sFair">-</b></span>
+      <span class="dim">價差<b id="sDiff">-</b></span>
+      <span id="prem">-</span>
+    </div>
+  </div>
+  <div id="wrap"><div id="chart"></div><div id="legend"></div></div>
+  <div class="foot">
+    <span><span class="dot" id="dStg"></span>STG 連線</span>
+    <span><span class="dot" id="dZro"></span>ZRO 連線</span>
+    <span id="cd1">-</span>
+    <span id="cd2">-</span>
+    <span>溢價 = STG / (0.08634 x ZRO) - 1。高低點以該根 ZRO 收盤價為分母，屬近似值。時間軸為 UTC+8</span>
+  </div>
+</div>
+
+<script>
+const R = 0.08634;
+const SHIFT = 8 * 3600; // 圖表時間軸以 UTC+8 顯示（把 unix 秒平移 8 小時）
+const IVS = ["1s", "1m", "5m", "15m", "1h"];
+const SPOT_REST = ["https://api.binance.com", "https://data-api.binance.vision"];
+const PERP_REST = ["https://fapi.binance.com"];
+const DEADLINES = [
+  ["合約結算倒數", new Date("2026-09-24T17:00:00+08:00")],
+  ["現貨下架倒數", new Date("2026-10-06T11:00:00+08:00")],
+];
+const $ = (id) => document.getElementById(id);
+const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } };
+
+let interval = store("iv") || "1m";
+let src = store("src") || "spot";
+if (!IVS.includes(interval)) interval = "1m";
+if (src === "perp" && interval === "1s") interval = "1m";
+
+// ---------- 圖表 ----------
+const chart = LightweightCharts.createChart($("chart"), {
+  autoSize: true,
+  layout: { background: { color: "#131722" }, textColor: "#d1d4dc", panes: { separatorColor: "#2a2e39" } },
+  grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
+  timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#2a2e39" },
+  rightPriceScale: { borderColor: "#2a2e39" },
+  crosshair: { mode: 0 },
+});
+const premSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
+  upColor: "#26a69a", downColor: "#ef5350", borderVisible: false,
+  wickUpColor: "#26a69a", wickDownColor: "#ef5350",
+  priceFormat: { type: "custom", formatter: (v) => v.toFixed(1) + "%", minMove: 0.01 },
+}, 0);
+premSeries.createPriceLine({ price: 0, color: "#787b86", lineWidth: 1, lineStyle: 2, title: "合理價" });
+const stgLine = chart.addSeries(LightweightCharts.LineSeries, { color: "#ef5350", lineWidth: 2, title: "STG",
+  priceFormat: { type: "price", precision: 5, minMove: 0.00001 } }, 1);
+const fairLine = chart.addSeries(LightweightCharts.LineSeries, { color: "#26a69a", lineWidth: 2, lineStyle: 2, title: "合理價",
+  priceFormat: { type: "price", precision: 5, minMove: 0.00001 } }, 1);
+try { chart.panes()[1].setHeight(180); } catch (e) {}
+
+// ---------- 資料 ----------
+let stg = new Map(), zro = new Map(), zroTimes = [];
+let socks = {};
+let gen = 0; // 切換週期或來源時遞增，舊連線的回呼自動失效
+
+const T = (ms) => Math.floor(ms / 1000) + SHIFT;
+const parse = (k) => ({ t: T(k[0]), o: +k[1], h: +k[2], l: +k[3], c: +k[4] });
+
+async function getKlines(hosts, path, sym) {
+  let err;
+  for (const h of hosts) {
+    const url = `${h}${path}?symbol=${sym}&interval=${interval}&limit=1000`;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json();
+      console.log(`[${sym}] ${j.length} 根 <- ${url}`);
+      return j.map(parse);
+    } catch (e) { err = e; console.warn("[warn]", url, e); }
+  }
+  throw err;
+}
+
+function zroAt(t) {
+  if (zro.has(t)) return zro.get(t);
+  let lo = 0, hi = zroTimes.length - 1, best = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (zroTimes[m] <= t) { best = m; lo = m + 1; } else hi = m - 1; }
+  return best >= 0 ? zro.get(zroTimes[best]) : null;
+}
+
+function premBar(s, z) {
+  const fair = R * z.c;
+  const o = (s.o / (R * z.o) - 1) * 100, c = (s.c / fair - 1) * 100;
+  const h = Math.max(o, c, (s.h / fair - 1) * 100), l = Math.min(o, c, (s.l / fair - 1) * 100);
+  return { time: s.t, open: o, high: h, low: l, close: c };
+}
+
+function render(t, full) {
+  const s = stg.get(t), z = zroAt(t);
+  if (!s || !z) return null;
+  const pb = premBar(s, z);
+  const fair = R * z.c;
+  if (!full) {
+    try { premSeries.update(pb); stgLine.update({ time: t, value: s.c }); fairLine.update({ time: t, value: fair }); } catch (e) {}
+  }
+  return { pb, sv: { time: t, value: s.c }, fv: { time: t, value: fair } };
+}
+
+function setStats(t) {
+  const s = stg.get(t), z = zroAt(t);
+  if (!s || !z) return;
+  const fair = R * z.c, prem = (s.c / fair - 1) * 100;
+  $("sStg").textContent = s.c.toFixed(5);
+  $("sZro").textContent = z.c.toFixed(4);
+  $("sFair").textContent = fair.toFixed(5);
+  $("sDiff").textContent = (s.c - fair >= 0 ? "+" : "") + (s.c - fair).toFixed(5);
+  const p = $("prem");
+  p.textContent = (prem >= 0 ? "+" : "") + prem.toFixed(2) + "%";
+  p.className = prem >= 0 ? "up" : "down";
+}
+
+let lastT = 0;
+async function load() {
+  const my = ++gen;
+  closeSocks();
+  ["dStg", "dZro"].forEach((d) => ($(d).className = "dot"));
+  const stgHosts = src === "perp" ? PERP_REST : SPOT_REST;
+  const stgPath = src === "perp" ? "/fapi/v1/klines" : "/api/v3/klines";
+  let a, b;
+  try { [a, b] = await Promise.all([getKlines(stgHosts, stgPath, "STGUSDT"), getKlines(SPOT_REST, "/api/v3/klines", "ZROUSDT")]); }
+  catch (e) { console.error(e); $("legend").textContent = "載入歷史資料失敗：" + e; return; }
+  if (my !== gen) return;
+  stg = new Map(a.map((x) => [x.t, x]));
+  zro = new Map(b.map((x) => [x.t, x]));
+  zroTimes = b.map((x) => x.t);
+  const pd = [], sd = [], fd = [];
+  for (const x of a) { const r = render(x.t, true); if (r) { pd.push(r.pb); sd.push(r.sv); fd.push(r.fv); } }
+  premSeries.setData(pd); stgLine.setData(sd); fairLine.setData(fd);
+  chart.timeScale().fitContent();
+  lastT = a.length ? a[a.length - 1].t : 0;
+  setStats(lastT);
+  console.log(`已畫 ${pd.length} 根溢價 K 線，週期 ${interval}，來源 ${src}`);
+  if (src === "perp") pollPerp(my); // 實測合約 WebSocket 連上但無推送，改 REST 每 2 秒輪詢
+  else openSock("stg", "wss://stream.binance.com:9443/ws/stgusdt@kline_" + interval, "dStg", my);
+  openSock("zro", "wss://stream.binance.com:9443/ws/zrousdt@kline_" + interval, "dZro", my);
+}
+
+function openSock(name, url, dot, my) {
+  if (my !== gen) return;
+  const ws = new WebSocket(url);
+  socks[name] = ws;
+  ws.onopen = () => ($(dot).className = "dot ok");
+  ws.onclose = () => { $(dot).className = "dot bad"; if (my === gen) setTimeout(() => openSock(name, url, dot, my), 2000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (ev) => {
+    if (my !== gen) return;
+    const k = JSON.parse(ev.data).k; if (!k) return;
+    const bar = { t: T(k.t), o: +k.o, h: +k.h, l: +k.l, c: +k.c };
+    if (name === "stg") { stg.set(bar.t, bar); lastT = Math.max(lastT, bar.t); }
+    else { if (!zro.has(bar.t)) zroTimes.push(bar.t); zro.set(bar.t, bar); }
+    render(bar.t, false);
+    setStats(lastT);
+  };
+}
+async function pollPerp(my) {
+  while (my === gen) {
+    try {
+      const r = await fetch(`${PERP_REST[0]}/fapi/v1/klines?symbol=STGUSDT&interval=${interval}&limit=2`);
+      const j = await r.json();
+      if (my !== gen) return;
+      for (const k of j) { const bar = parse(k); stg.set(bar.t, bar); lastT = Math.max(lastT, bar.t); render(bar.t, false); }
+      setStats(lastT);
+      $("dStg").className = "dot ok";
+    } catch (e) { $("dStg").className = "dot bad"; console.warn("[warn] 合約輪詢失敗", e); }
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+}
+function closeSocks() { for (const k in socks) { socks[k].onclose = null; try { socks[k].close(); } catch (e) {} } socks = {}; }
+
+// ---------- 控制列 ----------
+function buildBar() {
+  $("ivs").innerHTML = "";
+  for (const iv of IVS) {
+    const b = document.createElement("button");
+    b.textContent = iv; b.dataset.iv = iv;
+    b.className = iv === interval ? "on" : "";
+    if (iv === "1s" && src === "perp") b.disabled = true; // 合約沒有 1 秒線
+    b.onclick = () => { interval = iv; store("iv", iv); buildBar(); load(); };
+    $("ivs").appendChild(b);
+  }
+  document.querySelectorAll("#srcs button").forEach((b) => {
+    b.className = b.dataset.src === src ? "on" : "";
+    b.onclick = () => {
+      src = b.dataset.src; store("src", src);
+      if (src === "perp" && interval === "1s") { interval = "1m"; store("iv", interval); }
+      buildBar(); load();
+    };
+  });
+}
+
+// ---------- 十字線圖例 ----------
+chart.subscribeCrosshairMove((p) => {
+  const d = p.seriesData && p.seriesData.get(premSeries);
+  const lg = $("legend");
+  if (!d) { lg.textContent = ""; return; }
+  const f = (v) => (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+  const cls = d.close >= d.open ? "up" : "down";
+  const sv = p.seriesData.get(stgLine), fv = p.seriesData.get(fairLine);
+  lg.innerHTML = `溢價 <span class="${cls}">開 ${f(d.open)} 高 ${f(d.high)} 低 ${f(d.low)} 收 ${f(d.close)}</span>` +
+    (sv && fv ? `<br><span class="dim">STG ${sv.value.toFixed(5)}　合理價 ${fv.value.toFixed(5)}</span>` : "");
+});
+
+// ---------- 倒數 ----------
+function tickCountdown() {
+  DEADLINES.forEach(([name, dt], i) => {
+    const ms = dt - Date.now();
+    const el = $("cd" + (i + 1));
+    if (ms <= 0) { el.textContent = name + "：已到"; return; }
+    const s = Math.floor(ms / 1000), dd = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
+    el.textContent = `${name}：${dd}天 ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  });
+}
+setInterval(tickCountdown, 1000); tickCountdown();
+
+buildBar();
+load();
+</script>
+</body>
+</html>

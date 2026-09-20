@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>STG 結算價試算器</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.8/dist/lightweight-charts.standalone.production.js" integrity="sha384-8J8e9bGIwf7e9BLO5rwf4zJwNRKcypGnvuGzORD/t4TrFA1gWbl3Hsi/RvyWwBKl" crossorigin="anonymous"></script>
+<style>
+  :root { --bg:#131722; --panel:#1e222d; --line:#2a2e39; --text:#d1d4dc; --dim:#787b86; --up:#26a69a; --down:#ef5350; --gold:#f0b90b; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:-apple-system,"PingFang TC","Helvetica Neue",Arial,sans-serif; font-size:13px; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  .bar { display:flex; gap:22px; padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; align-items:flex-start; }
+  .card { min-width:150px; }
+  .card .k { color:var(--dim); font-size:12px; margin-bottom:2px; }
+  .card .v { font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .card .s { color:var(--dim); font-size:12px; margin-top:2px; font-variant-numeric:tabular-nums; }
+  .up { color:var(--up); } .down { color:var(--down); } .gold { color:var(--gold); }
+  #wrap { position:relative; flex:1; min-height:0; }
+  #chart { position:absolute; inset:0; }
+  #legend { position:absolute; left:10px; top:8px; z-index:5; font-size:12px; line-height:1.7; pointer-events:none;
+    background:rgba(19,23,34,.8); padding:4px 8px; border-radius:4px; font-variant-numeric:tabular-nums; }
+  .foot { display:flex; gap:18px; padding:6px 14px; background:var(--panel); border-top:1px solid var(--line); color:var(--dim); font-size:12px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#f0b90b; margin-right:5px; }
+  .dot.ok { background:var(--up); } .dot.bad { background:var(--down); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="bar">
+    <div class="card"><div class="k">指數價（幣安 STGUSDT 合約）</div><div class="v" id="vIdx">-</div><div class="s" id="sIdx"> </div></div>
+    <div class="card"><div class="k">30 分鐘滾動平均（若此刻下架的結算價）</div><div class="v gold" id="vMa">-</div><div class="s" id="sMa"> </div></div>
+    <div class="card"><div class="k" id="kWin">結算窗口</div><div class="v" id="vWin">-</div><div class="s" id="sWin"> </div></div>
+    <div class="card"><div class="k">預估結算價（窗口內）</div><div class="v down" id="vProj">-</div><div class="s" id="sProj"> </div></div>
+  </div>
+  <div id="wrap"><div id="chart"></div><div id="legend"></div></div>
+  <div class="foot">
+    <span><span class="dot" id="dot"></span>指數價連線</span>
+    <span id="fWin">-</span>
+    <span>結算價 = 下架前最後 30 分鐘每秒指數價平均（共 1800 筆，幣安下架 FAQ）。請保持此分頁在前景，背景分頁瀏覽器會降低計時頻率。時間為 UTC+8</span>
+  </div>
+</div>
+
+<script>
+const N = 1800;                 // 結算價平均的筆數（30 分鐘 x 每秒）
+const SHIFT = 8 * 3600;         // 圖表時間軸以 UTC+8 顯示
+const REST = "https://fapi.binance.com/fapi/v1";
+const WS_ISO = new URLSearchParams(location.search).get("start") || "2026-09-24T16:30:00+08:00"; // ?start= 可預演
+const wsSec = Math.floor(new Date(WS_ISO).getTime() / 1000);
+const weSec = wsSec + N;
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmtT = (sec) => new Date(sec * 1000).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const hms = (s) => { s = Math.max(0, s); const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); return (d ? d + "天 " : "") + [h, m, s % 60].map((x) => String(x).padStart(2, "0")).join(":"); };
+const f5 = (v) => v.toFixed(5);
+const pct = (v) => (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+
+// ---------- 圖表 ----------
+const chart = LightweightCharts.createChart($("chart"), {
+  autoSize: true,
+  layout: { background: { color: "#131722" }, textColor: "#d1d4dc" },
+  grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
+  timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#2a2e39" },
+  rightPriceScale: { borderColor: "#2a2e39" },
+});
+const pf = { type: "price", precision: 5, minMove: 0.00001 };
+const idxS = chart.addSeries(LightweightCharts.LineSeries, { color: "#8ab4f8", lineWidth: 1, title: "指數價", priceFormat: pf });
+const maS = chart.addSeries(LightweightCharts.LineSeries, { color: "#f0b90b", lineWidth: 2, title: "30分滾動均", priceFormat: pf });
+const cumS = chart.addSeries(LightweightCharts.LineSeries, { color: "#26a69a", lineWidth: 2, title: "窗口累積均", priceFormat: pf });
+const projS = chart.addSeries(LightweightCharts.LineSeries, { color: "#ef5350", lineWidth: 2, lineStyle: 2, title: "預估結算價", priceFormat: pf });
+
+// ---------- 資料 ----------
+let b0 = 0, P = [], S = [0], displayStart = 0, ready = false;
+const liveMap = new Map();      // sec -> 真實每秒指數價
+const getJ = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(r.status); return r.json(); };
+
+async function seedFetch(fromSec) {
+  const out = new Map();
+  let cur = fromSec * 1000;
+  while (cur < Date.now()) {
+    const j = await getJ(`${REST}/indexPriceKlines?pair=STGUSDT&interval=1m&startTime=${cur}&limit=1500`);
+    if (!Array.isArray(j) || !j.length) break;
+    for (const k of j) { const t = Math.floor(k[0] / 1000), c = +k[4]; for (let s = t; s < t + 60; s++) out.set(s, c); }
+    cur = j[j.length - 1][0] + 60000;
+    if (j.length < 1500) break;
+  }
+  console.log(`[seed] ${out.size} 秒（1 分鐘指數價近似）自 ${fmtT(fromSec)}`);
+  return out;
+}
+
+async function rebuild() {
+  const now = Math.floor(Date.now() / 1000);
+  displayStart = wsSec <= now ? Math.min(wsSec - 300, now - 3600) : now - 3600;
+  b0 = Math.max(now - 90000, displayStart - N);          // 往前多抓 N 秒，讓滾動平均一開始就有值
+  const seed = await seedFetch(b0);
+  P = []; S = [0];
+  let last = null;
+  for (let s = b0; s <= now; s++) {
+    let v = liveMap.has(s) ? liveMap.get(s) : seed.get(s);
+    if (v == null) v = last;
+    if (v == null) continue;                              // 開頭還沒有資料的秒略過
+    if (P.length === 0) b0 = s;
+    P.push(v); S.push(S[S.length - 1] + v); last = v;
+  }
+  renderAll();
+  console.log(`[rebuild] ${P.length} 秒，displayStart=${fmtT(displayStart)}，窗口 ${fmtT(wsSec)} ~ ${fmtT(weSec)}`);
+}
+
+function pointsAt(i) {
+  const sec = b0 + i, o = { t: sec + SHIFT, idx: P[i] };
+  if (i >= N - 1) o.ma = (S[i + 1] - S[i + 1 - N]) / N;
+  if (sec >= wsSec && sec < weSec && wsSec - b0 >= 0) {
+    const a = wsSec - b0, k = sec - wsSec + 1, known = S[i + 1] - S[a];
+    o.cum = known / k;
+    o.proj = (known + P[i] * (N - k)) / N;
+  }
+  return o;
+}
+
+function renderAll() {
+  const d = { idx: [], ma: [], cum: [], proj: [] };
+  for (let i = Math.max(0, displayStart - b0); i < P.length; i++) {
+    const o = pointsAt(i);
+    d.idx.push({ time: o.t, value: o.idx });
+    if (o.ma != null) d.ma.push({ time: o.t, value: o.ma });
+    if (o.cum != null) { d.cum.push({ time: o.t, value: o.cum }); d.proj.push({ time: o.t, value: o.proj }); }
+  }
+  idxS.setData(d.idx); maS.setData(d.ma); cumS.setData(d.cum); projS.setData(d.proj);
+  if (d.idx.length) { try { chart.timeScale().setVisibleRange({ from: d.idx[0].time, to: d.idx[d.idx.length - 1].time + 60 }); } catch (e) {} }
+  ready = true;
+  refreshStats();
+}
+
+function updateSeries(i) {
+  const o = pointsAt(i);
+  idxS.update({ time: o.t, value: o.idx });
+  if (o.ma != null) maS.update({ time: o.t, value: o.ma });
+  if (o.cum != null) { cumS.update({ time: o.t, value: o.cum }); projS.update({ time: o.t, value: o.proj }); }
+}
+
+function ingest(sec, price) {
+  if (!ready) return;
+  liveMap.set(sec, price);
+  const i = sec - b0;
+  if (i < 0) return;
+  if (i < P.length) {                                     // 同一秒或補寫：只允許覆寫最後一點
+    if (i === P.length - 1) { P[i] = price; S[i + 1] = S[i] + price; updateSeries(i); }
+    refreshStats(); return;
+  }
+  while (P.length < i) { const v = P[P.length - 1]; P.push(v); S.push(S[S.length - 1] + v); updateSeries(P.length - 1); }  // 漏掉的秒沿用上一個價格
+  P.push(price); S.push(S[S.length - 1] + price); updateSeries(P.length - 1);
+  refreshStats();
+}
+
+// ---------- 數字面板 ----------
+function refreshStats() {
+  if (!P.length) return;
+  const n = P.length, i = n - 1, nowSec = b0 + i, idx = P[i];
+  $("vIdx").textContent = f5(idx);
+  $("sIdx").textContent = fmtT(nowSec);
+  if (n >= N) {
+    const ma = (S[n] - S[n - N]) / N;
+    $("vMa").textContent = f5(ma);
+    $("sMa").textContent = `指數價相對均線 ${pct((idx / ma - 1) * 100)}`;
+  }
+  const a = wsSec - b0, real = (() => { let c = 0; for (let s = wsSec; s <= Math.min(nowSec, weSec - 1); s++) if (liveMap.has(s)) c++; return c; })();
+  const nowReal = Math.floor(Date.now() / 1000);
+  if (nowReal < wsSec) {
+    $("kWin").textContent = "結算窗口開始倒數";
+    $("vWin").textContent = hms(wsSec - nowReal);
+    $("sWin").textContent = `${fmtT(wsSec)} 開始，${fmtT(weSec)} 結算`;
+    $("vProj").textContent = "-"; $("sProj").textContent = "窗口尚未開始";
+  } else if (nowSec < weSec - 1 && a >= 0) {
+    const k = Math.min(nowSec - wsSec + 1, N), known = S[i + 1] - S[a], cum = known / k, proj = (known + idx * (N - k)) / N;
+    $("kWin").textContent = "窗口累積平均（已鎖定）";
+    $("vWin").textContent = f5(cum);
+    $("sWin").textContent = `已過 ${k}/${N} 秒，剩 ${hms(N - k)}；真實秒樣本 ${real} 筆，其餘為 1 分鐘近似`;
+    $("vProj").textContent = f5(proj);
+    $("sProj").textContent = `若剩餘時間指數價維持 ${f5(idx)}；相對現價 ${pct((proj / idx - 1) * 100)}`;
+  } else if (a >= 0 && a + N <= P.length) {
+    const fin = (S[a + N] - S[a]) / N;
+    $("kWin").textContent = "窗口已結束，最終平均";
+    $("vWin").textContent = f5(fin);
+    $("sWin").textContent = `${fmtT(wsSec)} 到 ${fmtT(weSec)}；真實秒樣本 ${real} / ${N}`;
+    $("vProj").textContent = f5(fin); $("sProj").textContent = "已是最終值";
+  }
+  $("fWin").textContent = `窗口：${fmtT(wsSec)} 到 ${fmtT(weSec)}${new URLSearchParams(location.search).get("start") ? "（預演）" : ""}`;
+}
+
+// ---------- 輪詢 ----------
+async function poll() {
+  while (true) {
+    try {
+      const j = await getJ(`${REST}/premiumIndex?symbol=STGUSDT`);
+      ingest(Math.floor(j.time / 1000), +j.indexPrice);
+      $("dot").className = "dot ok";
+    } catch (e) { $("dot").className = "dot bad"; console.warn("[warn] 輪詢失敗", e); }
+    await sleep(1000 - (Date.now() % 1000) + 30);          // 對齊每秒邊界
+  }
+}
+
+chart.subscribeCrosshairMove((p) => {
+  const g = (s) => { const d = p.seriesData && p.seriesData.get(s); return d ? f5(d.value) : "-"; };
+  $("legend").innerHTML = p.time ? `<span style="color:#8ab4f8">指數價 ${g(idxS)}</span>　<span class="gold">30 分滾動均 ${g(maS)}</span>　<span class="up">窗口累積均 ${g(cumS)}</span>　<span class="down">預估結算價 ${g(projS)}</span>` : "";
+});
+
+document.addEventListener("visibilitychange", async () => {  // 分頁被背景節流後回來：用 1 分鐘指數價補洞，再重畫
+  if (!document.hidden) { ready = false; await rebuild(); }
+});
+
+(async () => { await rebuild(); poll(); setInterval(refreshStats, 1000); })();
+</script>
+</body>
+</html>
