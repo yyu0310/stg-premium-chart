@@ -36,7 +36,7 @@
     <div class="grp" id="pers"></div>
     <div class="cards">
       <div class="card"><div class="k">現貨相對合約溢價</div><div class="v" id="cBs">-</div><div class="s" id="cBsS"> </div></div>
-      <div class="card"><div class="k">持倉量（顆）</div><div class="v" id="cOi">-</div><div class="s" id="cOiS"> </div></div>
+      <div class="card"><div class="k">持倉量（USDT）</div><div class="v" id="cOi">-</div><div class="s" id="cOiS"> </div></div>
       <div class="card"><div class="k">全市場多空帳戶比</div><div class="v" id="cGls">-</div><div class="s" id="cGlsS"> </div></div>
       <div class="card"><div class="k">大戶持倉多空比</div><div class="v" id="cTlp">-</div><div class="s" id="cTlpS"> </div></div>
       <div class="card"><div class="k">主動買賣量比</div><div class="v" id="cTk">-</div><div class="s" id="cTkS"> </div></div>
@@ -80,7 +80,7 @@ const line = (color, title, pane, fmt, extra) => chart.addSeries(LightweightChar
   Object.assign({ color, lineWidth: 2, title, priceFormat: fmt || { type: "price", precision: 2, minMove: 0.01 } }, extra || {}), pane);
 const priceS = line("#8ab4f8", "價格", 0, { type: "price", precision: 5, minMove: 0.00001 });
 const basisS = line("#ffb74d", "現貨/合約溢價", 1, { type: "custom", formatter: (v) => (v >= 0 ? "+" : "") + v.toFixed(3) + "%", minMove: 0.001 });
-const oiS = line("#f0b90b", "持倉量", 2, { type: "custom", formatter: (v) => (v / 1e6).toFixed(2) + "M", minMove: 1 });
+const oiS = line("#f0b90b", "持倉量(USDT)", 2, { type: "custom", formatter: (v) => "$" + (v / 1e6).toFixed(2) + "M", minMove: 1 });
 const glsS = line("#26a69a", "全市場帳戶", 3, { type: "price", precision: 3, minMove: 0.001 });
 const tlaS = line("#8ab4f8", "大戶帳戶", 3, { type: "price", precision: 3, minMove: 0.001 });
 const tlpS = line("#ef5350", "大戶持倉", 3, { type: "price", precision: 3, minMove: 0.001 });
@@ -121,7 +121,7 @@ async function loadAll(first) {
   const [kl, oi, gls, tla, tlp, tk, fr, pi, sp] = res;
   data = {
     price: conv(kl, 0, (r) => +r[4]),
-    oi: conv(oi, "timestamp", (r) => +r.sumOpenInterest),
+    oi: conv(oi, "timestamp", (r) => +r.sumOpenInterestValue),  // USDT 名目金額，不用 sumOpenInterest（那是顆數，會跟幣安前端的 USDT 數字對不上）
     gls: conv(gls, "timestamp", (r) => +r.longShortRatio),
     tla: conv(tla, "timestamp", (r) => +r.longShortRatio),
     tlp: conv(tlp, "timestamp", (r) => +r.longShortRatio),
@@ -148,7 +148,7 @@ const back = (a, secs) => { if (!a || !a.length) return null; const t = a[a.leng
 const pct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 function refreshCards() {
   const oi = last(data.oi), oi24 = back(data.oi, 86400);
-  if (oi) { $("cOi").textContent = (oi.value / 1e6).toFixed(3) + "M"; $("cOiS").textContent = oi24 ? "24 小時 " + pct((oi.value / oi24.value - 1) * 100) : "資料不足 24 小時"; }
+  if (oi) { $("cOi").textContent = "$" + (oi.value / 1e6).toFixed(3) + "M"; $("cOiS").textContent = oi24 ? "24 小時 " + pct((oi.value / oi24.value - 1) * 100) : "資料不足 24 小時"; }
   const g = last(data.gls); if (g) { $("cGls").textContent = g.value.toFixed(3); $("cGls").className = "v " + (g.value >= 1 ? "up" : "down"); const g24 = back(data.gls, 86400); $("cGlsS").textContent = g24 ? "24 小時前 " + g24.value.toFixed(3) : " "; }
   const p = last(data.tlp); if (p) { $("cTlp").textContent = p.value.toFixed(3); $("cTlp").className = "v " + (p.value >= 1 ? "up" : "down"); const a = last(data.tla); $("cTlpS").textContent = a ? "大戶帳戶 " + a.value.toFixed(3) : " "; }
   const k = last(data.tk); if (k) { $("cTk").textContent = k.value.toFixed(3); $("cTk").className = "v " + (k.value >= 1 ? "up" : "down"); }
@@ -186,7 +186,7 @@ chart.subscribeCrosshairMove((p) => {
   const f = (a, d) => { const x = nearest(a, p.time); return x ? x.value.toFixed(d) : "-"; };
   const oi = nearest(data.oi, p.time);
   $("legend").innerHTML =
-    `價格 ${f(data.price, 5)}　<span class="gold">現貨/合約 ${f(data.basis, 3)}%</span>　持倉 ${oi ? (oi.value / 1e6).toFixed(3) + "M" : "-"}<br>` +
+    `價格 ${f(data.price, 5)}　<span class="gold">現貨/合約 ${f(data.basis, 3)}%</span>　持倉 ${oi ? "$" + (oi.value / 1e6).toFixed(3) + "M" : "-"}<br>` +
     `<span class="up">全市場 ${f(data.gls, 3)}</span>　<span style="color:#8ab4f8">大戶帳戶 ${f(data.tla, 3)}</span>　<span class="down">大戶持倉 ${f(data.tlp, 3)}</span>　` +
     `<span style="color:#c792ea">主動買賣 ${f(data.tk, 3)}</span>　<span class="gold">費率 ${f(data.fr, 4)}%</span>`;
 });
