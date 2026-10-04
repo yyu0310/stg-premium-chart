@@ -2,6 +2,8 @@
 
 Four static web pages that track the STG token against its fixed ZRO conversion ratio of 1 STG = 0.08634 ZRO, using Binance public market data. There is no backend and no API key. The browser calls Binance directly, so the charts keep updating while the tab is open.
 
+![index.html: STG premium over fair value, 1h candles](docs/demo.png)
+
 ## Pages
 
 - `index.html`: premium candles of STG over its fair value, which is 0.08634 times the ZRO spot price, with a price panel below. Choose Binance spot or the USDT-M perpetual, and 1s, 1m, 5m, 15m or 1h candles. Binance has no 1s candles for the perpetual, so that option is disabled there.
