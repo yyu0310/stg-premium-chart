@@ -23,6 +23,18 @@
   a.page:hover { border-color:var(--blue); }
   a.page b { display:block; font-size:16px; margin-bottom:6px; }
   a.page span { color:var(--dim); font-size:13px; line-height:1.5; }
+  h2 { font-size:16px; margin:0 0 4px; }
+  .arb { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:14px; margin-bottom:28px; }
+  .arb .note { color:var(--dim); font-size:12px; line-height:1.6; margin-bottom:10px; }
+  .arb label { font-size:13px; }
+  .arb input { width:110px; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:4px; padding:5px 8px; font-size:14px; margin-left:6px; }
+  .tw { overflow-x:auto; margin-top:10px; }
+  table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; font-size:13px; white-space:nowrap; }
+  th, td { text-align:right; padding:7px 10px; border-bottom:1px solid var(--line); }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--dim); font-weight:400; font-size:12px; }
+  td b { font-size:15px; }
+  .warn { color:#f0b90b; }
   .foot { color:var(--dim); font-size:12px; margin-top:24px; line-height:1.6; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#f0b90b; margin-right:5px; }
   .dot.ok { background:var(--up); } .dot.bad { background:var(--down); }
@@ -38,6 +50,20 @@
     <div class="stat"><div class="k">STG 合約 / 合理價</div><div class="v" id="vPx">-</div><div class="s" id="sPx"> </div></div>
     <div class="stat"><div class="k">資金費率（下次）</div><div class="v" id="vFr">-</div><div class="s" id="sFr"> </div></div>
     <div class="stat"><div class="k">持倉量（USDT）</div><div class="v" id="vOi">-</div><div class="s" id="sOi"> </div></div>
+  </div>
+
+  <div class="arb">
+    <h2>套利試算（Bybit 合約，市價吃第二檔）</h2>
+    <div class="note">進場兩腿都以訂單簿第二檔價格成交；出場假設 ZRO 中間價不變、STG 回到合理價（溢價 0），並同樣吃到第二檔的距離。手續費以非 VIP 吃單 0.055% 計，每腿進出各一次共 4 次。1 倍槓桿本金 = 兩腿名目合計。資金費率不含在淨利內，另列每次結算的金額。Bybit STGUSDT 將於 2026-10-10 17:00（UTC+8）下架，結算價是下架前 30 分鐘平均指數價，不是合理價</div>
+    <label>每條腿名目（USDT）<input id="nIn" type="number" min="10" step="100" value="1000"></label>
+    <span class="note" id="arbMeta"></span>
+    <div class="tw"><table>
+      <thead><tr><th>方向</th><th>進場成交價 STG / ZRO</th><th>進場溢價</th><th>毛利</th><th>手續費</th><th>淨利</th><th>1 倍本金報酬</th><th>每次 STG 結算資金費</th><th>前兩檔可成交</th></tr></thead>
+      <tbody>
+        <tr><td>做多 STG / 做空 ZRO<br><span class="note">折價時用</span></td><td id="aPx">-</td><td id="aPrem">-</td><td id="aGross">-</td><td id="aFee">-</td><td id="aNet">-</td><td id="aRoi">-</td><td id="aFund">-</td><td id="aCap">-</td></tr>
+        <tr><td>做空 STG / 做多 ZRO<br><span class="note">溢價時用</span></td><td id="bPx">-</td><td id="bPrem">-</td><td id="bGross">-</td><td id="bFee">-</td><td id="bNet">-</td><td id="bRoi">-</td><td id="bFund">-</td><td id="bCap">-</td></tr>
+      </tbody>
+    </table></div>
   </div>
 
   <div class="pages">
@@ -85,6 +111,67 @@ async function refresh() {
   $("sOi").textContent = `24 小時成交 $${(+p.turnover24h / 1e6).toFixed(2)}M`;
 }
 refresh(); setInterval(refresh, 10000);
+
+// ---------- 套利試算 ----------
+const FEE = 0.00055;                                        // Bybit 非 VIP 合約吃單費率（官方費率表 VIP 0）
+// calc-start
+// S、Z：{ b: [[價, 顆], ...], a: [[價, 顆], ...] }，買賣盤各自由好到差；N：每條腿名目 USDT；fee：吃單費率
+// 回傳兩個方向 A（做多 STG / 做空 ZRO）與 B（做空 STG / 做多 ZRO）的試算
+function arbCalc(S, Z, N, fee) {
+  const mid = (o) => (o.b[0][0] + o.a[0][0]) / 2;
+  const cum2 = (side) => side[0][0] * side[0][1] + side[1][0] * side[1][1];   // 前兩檔名目 USDT
+  const mS = mid(S), mZ = mid(Z), fair = R * mZ;            // 出場時 STG 中間價回到合理價，ZRO 中間價不變
+  const run = (sEntry, zEntry, sExit, zExit, sDir) => {     // sDir 1：做多 STG；-1：做空 STG（ZRO 腿方向相反）
+    const qS = N / sEntry, qZ = N / zEntry;
+    const gross = sDir * (qS * (sExit - sEntry) - qZ * (zExit - zEntry));
+    const fees = fee * (2 * N + qS * sExit + qZ * zExit);
+    const net = gross - fees;
+    return { sEntry, zEntry, entryPrem: (sEntry / (R * zEntry) - 1) * 100, gross, fees, net, netPct: net / N * 100, roi1x: net / (2 * N) * 100 };
+  };
+  const A = run(S.a[1][0], Z.b[1][0], fair * (S.b[1][0] / mS), Z.a[1][0], 1);    // 買 STG 賣二價、賣 ZRO 買二價；出場反向
+  const B = run(S.b[1][0], Z.a[1][0], fair * (S.a[1][0] / mS), Z.b[1][0], -1);
+  A.cap = Math.min(cum2(S.a), cum2(Z.b));
+  B.cap = Math.min(cum2(S.b), cum2(Z.a));
+  return { A, B, midPrem: (mS / fair - 1) * 100 };
+}
+// calc-end
+
+const nIn = $("nIn");
+try { const v = localStorage.getItem("arbN"); if (v) nIn.value = v; } catch (e) {}
+nIn.oninput = () => { try { localStorage.setItem("arbN", nIn.value); } catch (e) {} renderArb(); };
+const usd = (v) => (v >= 0 ? "+$" : "-$") + Math.abs(v).toFixed(2);
+const book = (r) => ({ b: r.b.map((x) => [+x[0], +x[1]]), a: r.a.map((x) => [+x[0], +x[1]]) });
+let arbData = null;
+
+async function fetchArb() {
+  try {
+    const [s, z, st, zt] = await Promise.all([
+      bybit("/orderbook?category=linear&symbol=STGUSDT&limit=5"), bybit("/orderbook?category=linear&symbol=ZROUSDT&limit=5"),
+      bybit("/tickers?category=linear&symbol=STGUSDT"), bybit("/tickers?category=linear&symbol=ZROUSDT")]);
+    arbData = { S: book(s), Z: book(z), sFr: +st.list[0].fundingRate, zFr: +zt.list[0].fundingRate, zIv: zt.list[0].fundingIntervalHour, t: Date.now() };
+    renderArb();
+  } catch (e) { console.warn("[warn] 套利試算抓訂單簿失敗", e); $("arbMeta").textContent = "　訂單簿讀取失敗：" + e.message; }
+}
+
+function renderArb() {
+  if (!arbData) return;
+  const N = +nIn.value;
+  if (!(N > 0)) return;
+  const { S, Z, sFr, zFr, zIv } = arbData, r = arbCalc(S, Z, N, FEE);
+  $("arbMeta").textContent = `　中間價溢價 ${pct(r.midPrem)}（ZRO 用 Bybit 合約）；更新 ${new Date(arbData.t).toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}`;
+  for (const [k, x, dir] of [["a", r.A, 1], ["b", r.B, -1]]) {
+    $(k + "Px").textContent = `${x.sEntry.toFixed(5)} / ${x.zEntry.toFixed(4)}`;
+    $(k + "Prem").textContent = pct(x.entryPrem);
+    $(k + "Gross").textContent = usd(x.gross);
+    $(k + "Fee").innerHTML = `-$${x.fees.toFixed(2)}<br><span class="note">本金 ${(x.fees / (2 * N) * 100).toFixed(3)}%</span>`;   // 1 倍槓桿本金 = 兩腿名目，4 次吃單約佔 0.11%
+    $(k + "Net").innerHTML = `<b class="${cls(x.net)}">${usd(x.net)}</b><br>${pct(x.netPct)}`;
+    $(k + "Roi").innerHTML = `<span class="${cls(x.roi1x)}">${pct(x.roi1x)}</span>`;
+    const f = -dir * sFr * N;                              // 費率為正時多方付、空方收
+    $(k + "Fund").innerHTML = `<span class="${cls(f)}">${usd(f)}</span><br><span class="note">ZRO 每 ${zIv} 小時 ${usd(dir * zFr * N)}</span>`;
+    $(k + "Cap").innerHTML = `$${x.cap.toFixed(0)}` + (N > x.cap ? `<br><span class="warn">名目超過前兩檔，實際滑價更大</span>` : "");
+  }
+}
+fetchArb(); setInterval(fetchArb, 3000);
 </script>
 </body>
 </html>

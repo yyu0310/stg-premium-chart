@@ -41,6 +41,7 @@
     <div class="grp" id="srcs">
       <button data-src="binance" class="on">ZRO 幣安現貨</button>
       <button data-src="bybit">ZRO Bybit 現貨</button>
+      <button data-src="bybitPerp">ZRO Bybit 合約</button>
     </div>
     <div class="stat">
       <span class="dim">STG 合約<b id="sStg">-</b></span>
@@ -71,7 +72,7 @@ const store = (k, v) => { try { if (v === undefined) return localStorage.getItem
 let interval = store("iv") || "1m";
 let src = store("zsrc") || "binance";   // ZRO 現貨來源；STG 固定用 Bybit 合約
 if (!IVS.includes(interval)) interval = "1m";
-if (!["binance", "bybit"].includes(src)) src = "binance";
+if (!["binance", "bybit", "bybitPerp"].includes(src)) src = "binance";
 
 // ---------- 圖表 ----------
 const chart = LightweightCharts.createChart($("chart"), {
@@ -101,19 +102,20 @@ let gen = 0; // 切換週期或來源時遞增，舊輪詢自動失效
 const T = (ms) => Math.floor(+ms / 1000) + SHIFT;
 const parse = (k) => ({ t: T(k[0]), o: +k[1], h: +k[2], l: +k[3], c: +k[4] });
 
-// ex: "binance"（現貨）或 "bybit"；Bybit 的 STGUSDT 走永續合約 linear，其餘走 spot。回傳依時間升冪
+// ex: "binance"（現貨）、"bybit"（現貨）或 "bybitPerp"（永續合約）；Bybit 的 STGUSDT 一律走永續合約 linear。回傳依時間升冪
 async function getKlines(ex, sym, limit) {
   let err;
-  const urls = ex === "bybit"
-    ? [`${BYBIT}/kline?category=${sym === "STGUSDT" ? "linear" : "spot"}&symbol=${sym}&interval=${BYBIT_IV[interval]}&limit=${limit}`]
+  const by = ex.startsWith("bybit");
+  const urls = by
+    ? [`${BYBIT}/kline?category=${sym === "STGUSDT" || ex === "bybitPerp" ? "linear" : "spot"}&symbol=${sym}&interval=${BYBIT_IV[interval]}&limit=${limit}`]
     : SPOT_REST.map((h) => `${h}/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`);
   for (const url of urls) {
     try {
       const r = await fetch(url);
       if (!r.ok) throw new Error(r.status);
       const j = await r.json();
-      if (ex === "bybit" && j.retCode !== 0) throw new Error(j.retMsg);
-      const rows = ex === "bybit" ? j.result.list.slice().reverse() : j;   // Bybit 回傳新到舊
+      if (by && j.retCode !== 0) throw new Error(j.retMsg);
+      const rows = by ? j.result.list.slice().reverse() : j;   // Bybit 回傳新到舊
       if (limit > 2) console.log(`[${sym}] ${rows.length} 根 <- ${url}`);
       return rows.map(parse);
     } catch (e) { err = e; console.warn("[warn]", url, e); }
@@ -152,6 +154,7 @@ function setStats(t) {
   const fair = R * z.c, prem = (s.c / fair - 1) * 100;
   $("sStg").textContent = s.c.toFixed(5);
   $("sZro").textContent = z.c.toFixed(4);
+  fairLine.applyOptions({ title: `合理價（ZRO ${z.c.toFixed(4)}）` });   // 價格軸標籤同時顯示 ZRO，下單兩腿對照用
   $("sFair").textContent = fair.toFixed(5);
   $("sDiff").textContent = (s.c - fair >= 0 ? "+" : "") + (s.c - fair).toFixed(5);
   const p = $("prem");
@@ -227,7 +230,7 @@ chart.subscribeCrosshairMove((p) => {
   const cls = d.close >= d.open ? "up" : "down";
   const sv = p.seriesData.get(stgLine), fv = p.seriesData.get(fairLine);
   lg.innerHTML = `溢價 <span class="${cls}">開 ${f(d.open)} 高 ${f(d.high)} 低 ${f(d.low)} 收 ${f(d.close)}</span>` +
-    (sv && fv ? `<br><span class="dim">STG ${sv.value.toFixed(5)}　合理價 ${fv.value.toFixed(5)}</span>` : "");
+    (sv && fv ? `<br><span class="dim">STG ${sv.value.toFixed(5)}　合理價 ${fv.value.toFixed(5)}　ZRO ${(fv.value / R).toFixed(4)}</span>` : "");
 });
 
 buildBar();
