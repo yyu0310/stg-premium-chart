@@ -72,6 +72,14 @@
       <tbody id="slipBody"></tbody>
     </table></div>
     <div class="tw"><table>
+      <thead><tr><th>容量（最大名目）</th><th>滑價 ≤0.1%</th><th>≤0.25%</th><th>≤0.5%</th><th>≤1%</th></tr></thead>
+      <tbody id="capBody"></tbody>
+    </table></div>
+    <div class="tw"><table>
+      <thead><tr><th>策略倉位上限</th><th>淨利最高的倉位</th><th>該倉位淨利</th><th>打平前最大倉位</th></tr></thead>
+      <tbody id="sizeBody"></tbody>
+    </table></div>
+    <div class="tw"><table>
       <thead><tr><th>策略</th><th>進場均價 STG / ZRO</th><th>進場溢價</th><th>毛利</th><th>手續費</th><th>淨利</th><th>1 倍本金報酬</th><th>每次 STG 結算資金費</th></tr></thead>
       <tbody>
         <tr><td>STG 折價策略<br><span class="note">做多 STG / 做空 ZRO</span></td><td id="aPx">-</td><td id="aPrem">-</td><td id="aGross">-</td><td id="aFee">-</td><td id="aNet">-</td><td id="aRoi">-</td><td id="aFund">-</td></tr>
@@ -161,6 +169,33 @@ function arbCalc(S, Z, N, fee) {
   const depth = { sBid: depthNear(S.b, mS), sAsk: depthNear(S.a, mS), zBid: depthNear(Z.b, mZ), zAsk: depthNear(Z.a, mZ) };
   return { A, B, depth, midPrem: (mS / fair - 1) * 100 };
 }
+// 容量：滑價不超過 slip（例 0.005）時，這一側最多能吃多少名目。dir 1 買進吃賣盤、-1 賣出吃買盤；整本都在範圍內就回傳整本金額
+function capacity(side, mid, slip, dir) {
+  const ok = (N) => { const f = fill(side, N); return f != null && dir * (f.avg / mid - 1) <= slip + 1e-12; };
+  const total = side.reduce((t, [p, q]) => t + p * q, 0);
+  if (!ok(1e-6)) return 0;                                  // 買一或賣一本身就離中間價超過上限
+  if (ok(total)) return total;
+  let lo = 0, hi = total;
+  for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (ok(m)) lo = m; else hi = m; }   // 均價隨名目單調變差，二分搜尋
+  return lo;
+}
+// 策略倉位掃描：名目從 $50 每次乘 1.15 試到 $50 萬或訂單簿吃不完，回傳淨利最高的倉位與仍有淨利的最大倉位（格點近似）
+function sizeScan(S, Z, fee) {
+  const out = { A: { best: null, maxPos: null }, B: { best: null, maxPos: null } };
+  for (let N = 50; N <= 500000; N *= 1.15) {
+    const r = arbCalc(S, Z, N, fee);
+    for (const k of ["A", "B"]) {
+      const x = r[k];
+      if (!x) continue;
+      if (x.net > 0) {
+        if (!out[k].best || x.net > out[k].best.net) out[k].best = { N, net: x.net, netPct: x.netPct };
+        out[k].maxPos = N;
+      }
+    }
+    if (!r.A && !r.B) break;
+  }
+  return out;
+}
 // calc-end
 
 const nIn = $("nIn");
@@ -194,6 +229,13 @@ function renderArb() {
     const slip = (f.avg / m - 1) * 100, worst = (f.worst / m - 1) * 100;
     return `<tr><td>${name}</td><td>${f.avg.toFixed(dp)}</td><td><b class="${Math.abs(slip) >= 0.5 ? "down" : ""}">${pct(slip)}</b></td><td>${f.worst.toFixed(dp)}</td><td>${pct(worst)}</td>${depCell}</tr>`;
   }).join("");
+  const SLIPS = [0.001, 0.0025, 0.005, 0.01];
+  $("capBody").innerHTML = [["STG 買進", S.a, mS, 1], ["STG 賣出", S.b, mS, -1], ["ZRO 買進", Z.a, mZ, 1], ["ZRO 賣出", Z.b, mZ, -1]].map(([name, side, m, dir]) =>
+    `<tr><td>${name}</td>${SLIPS.map((sl) => `<td>${k$(capacity(side, m, sl, dir))}</td>`).join("")}</tr>`).join("");
+  const sz = sizeScan(S, Z, FEE);
+  $("sizeBody").innerHTML = [["STG 折價策略", sz.A], ["STG 溢價策略", sz.B]].map(([name, v]) => v.best
+    ? `<tr><td>${name}</td><td>${k$(v.best.N)}</td><td><b class="up">${usd(v.best.net)}</b><br>${pct(v.best.netPct)}</td><td>約 ${k$(v.maxPos)}</td></tr>`
+    : `<tr><td>${name}</td><td colspan="3"><span class="note">目前無利可圖：價差扣掉手續費與滑價後，任何倉位都虧</span></td></tr>`).join("");
   for (const [k, x, dir] of [["a", r.A, 1], ["b", r.B, -1]]) {
     if (!x) {                                                // 訂單簿吃不完名目
       for (const c of ["Px", "Prem", "Gross", "Fee", "Net", "Roi", "Fund"]) $(k + c).textContent = "-";
