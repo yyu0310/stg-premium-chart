@@ -2,14 +2,18 @@
 
 Static web pages that track the STG token against its fixed ZRO conversion ratio of 1 STG = 0.08634 ZRO, using public market data from Bybit and Binance. There is no backend and no API key. The browser calls the exchanges directly, so the charts keep updating while the tab is open.
 
-Data sources since October 2026: Binance settled its STGUSDT perpetual on 2026-09-24 and delisted STG spot on 2026-10-06, so STG now comes from the Bybit STGUSDT perpetual. Bybit has no STG spot market. ZRO spot can come from either Binance or Bybit.
+Data sources since October 2026: Binance settled its STGUSDT perpetual on 2026-09-24 and delisted STG spot on 2026-10-06, so STG now comes from the Bybit STGUSDT perpetual. Bybit has no STG spot market. ZRO can come from Binance spot, Bybit spot or the Bybit ZROUSDT perpetual. Bybit delists the STGUSDT perpetual on 2026-10-10 09:00 UTC, and the pages have no live STG data after that.
 
 ![premium.html: STG premium over fair value, 1h candles](docs/demo.png)
 
 ## Pages
 
-- `index.html`: the home page. Live premium, funding rate and open interest, refreshed every 10 seconds, with a button for each chart page. Every chart page has a home button back to it.
-- `premium.html`: premium candles of the Bybit STG perpetual over its fair value, which is 0.08634 times the ZRO spot price, with a price panel below. Choose Binance or Bybit for ZRO, and 1m, 5m, 15m or 1h candles. It polls both exchanges every 2 seconds.
+- `index.html`: the home page. Live premium, funding rate and open interest, refreshed every 10 seconds, with a button for each chart page. Every chart page has a home button back to it. Below the numbers is a pair-trade calculator built from the live Bybit order books, refreshed about once a second. Type a notional per leg and it shows:
+  - Slippage: the average fill price, slippage from mid and worst fill price for a market buy or sell of STG and of ZRO, walking up to 500 levels of the book.
+  - Capacity: the largest notional each of those market orders can fill before slippage passes 0.1%, 0.25%, 0.5% and 1%.
+  - Strategies: the STG discount strategy goes long STG and short ZRO; the STG premium strategy goes short STG and long ZRO. Each row has the entry fills, gross and net profit, the return on 1x capital and the funding paid or received per settlement. Exit assumes STG returns to fair value with the same slippage as the current book, and fees are the non-VIP taker rate of 0.055% on all four fills.
+  - Position size: for each strategy, the notional with the highest net profit and the largest notional that still nets a profit.
+- `premium.html`: premium candles of the Bybit STG perpetual over its fair value, which is 0.08634 times the ZRO spot price, with a price panel below. Choose Binance spot, Bybit spot or the Bybit perpetual for ZRO, and 1m, 5m, 15m or 1h candles. The fair-value label also shows the ZRO price. It polls both exchanges every 2 seconds.
 - `settlement.html`: settlement price calculator for the Binance STGUSDT perpetual delisting, kept as a record of the 2026-09-24 settlement. It still reads Binance. Binance's delisting FAQ defines the settlement price as the average of the per-second index price over the last 30 minutes, 1,800 samples in total. The page draws the index price and a rolling 30-minute average. Inside the window it also draws a running average and a projected settlement price.
 
 - `derivatives.html`: positioning charts for the Bybit STGUSDT perpetual. Panels for price, the premium over fair value with one line per ZRO source, open interest in USDT, the long/short account ratio and the funding rate. It refreshes every 30 seconds. Bybit doesn't publish top-trader or taker ratios, so those panels from the Binance version are gone.
