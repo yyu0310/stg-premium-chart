@@ -252,7 +252,7 @@ function renderArb() {
     $(k + "Fund").innerHTML = `<span class="${cls(f)}">${usd(f)}</span><br><span class="note">ZRO 每 ${zIv} 小時 ${usd(dir * zFr * N)}</span>`;
   }
 }
-fetchArb(); setInterval(fetchArb, 3000);
+(async function loop() { const t0 = Date.now(); await fetchArb(); setTimeout(loop, Math.max(0, 1000 - (Date.now() - t0))); })();   // 抓完才排下一輪，最快每秒一次
 </script>
 </body>
 </html>
