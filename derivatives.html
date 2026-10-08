@@ -28,11 +28,14 @@
   .foot { display:flex; gap:18px; padding:5px 12px; background:var(--panel); border-top:1px solid var(--line); color:var(--dim); font-size:12px; flex-wrap:wrap; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#f0b90b; margin-right:5px; }
   .dot.ok { background:var(--up); } .dot.bad { background:var(--down); }
+  a.home { color:var(--text); text-decoration:none; padding:5px 10px; border-radius:4px; background:var(--line); font-size:13px; white-space:nowrap; }
+  a.home:hover { background:#363a45; }
 </style>
 </head>
 <body>
 <div id="app">
   <div class="bar">
+    <a class="home" href="index.html">← 主站</a>
     <div class="grp" id="pers"></div>
     <div class="cards">
       <div class="card"><div class="k">合約相對合理價溢價（ZRO 幣安）</div><div class="v" id="cBs">-</div><div class="s" id="cBsS"> </div></div>
