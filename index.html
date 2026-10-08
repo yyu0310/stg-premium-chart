@@ -58,6 +58,7 @@
     <ul class="note">
       <li>進場：兩腿都下在 Bybit 合約，市價單沿訂單簿吃到輸入的名目，用成交均價計算</li>
       <li>出場：假設 ZRO 中間價不變、STG 回到合理價，滑價比照現在的訂單簿</li>
+      <li>滑價：市價單成交均價偏離中間價多少，最差成交價是吃到的最後一檔</li>
       <li>流動性：中間價 ±0.1% 內的掛單金額，名目超過時滑價會明顯變大</li>
       <li>手續費：非 VIP 吃單 0.055%，每腿進出各一次，共 4 次</li>
       <li>1 倍槓桿本金：兩腿名目合計</li>
@@ -67,10 +68,14 @@
     <label>每條腿名目（USDT）<input id="nIn" type="number" min="10" step="100" value="1000"></label>
     <span class="note" id="arbMeta"></span>
     <div class="tw"><table>
-      <thead><tr><th>策略</th><th>進場均價 STG / ZRO</th><th>進場溢價</th><th>毛利</th><th>手續費</th><th>淨利</th><th>1 倍本金報酬</th><th>每次 STG 結算資金費</th><th>中間價 ±0.1% 掛單</th></tr></thead>
+      <thead><tr><th>滑價試算</th><th>成交均價</th><th>滑價</th><th>最差成交價</th><th>最差偏離</th><th>中間價 ±0.1% 掛單</th></tr></thead>
+      <tbody id="slipBody"></tbody>
+    </table></div>
+    <div class="tw"><table>
+      <thead><tr><th>策略</th><th>進場均價 STG / ZRO</th><th>進場溢價</th><th>毛利</th><th>手續費</th><th>淨利</th><th>1 倍本金報酬</th><th>每次 STG 結算資金費</th></tr></thead>
       <tbody>
-        <tr><td>STG 折價策略<br><span class="note">做多 STG / 做空 ZRO</span></td><td id="aPx">-</td><td id="aPrem">-</td><td id="aGross">-</td><td id="aFee">-</td><td id="aNet">-</td><td id="aRoi">-</td><td id="aFund">-</td><td id="aCap">-</td></tr>
-        <tr><td>STG 溢價策略<br><span class="note">做空 STG / 做多 ZRO</span></td><td id="bPx">-</td><td id="bPrem">-</td><td id="bGross">-</td><td id="bFee">-</td><td id="bNet">-</td><td id="bRoi">-</td><td id="bFund">-</td><td id="bCap">-</td></tr>
+        <tr><td>STG 折價策略<br><span class="note">做多 STG / 做空 ZRO</span></td><td id="aPx">-</td><td id="aPrem">-</td><td id="aGross">-</td><td id="aFee">-</td><td id="aNet">-</td><td id="aRoi">-</td><td id="aFund">-</td></tr>
+        <tr><td>STG 溢價策略<br><span class="note">做空 STG / 做多 ZRO</span></td><td id="bPx">-</td><td id="bPrem">-</td><td id="bGross">-</td><td id="bFee">-</td><td id="bNet">-</td><td id="bRoi">-</td><td id="bFund">-</td></tr>
       </tbody>
     </table></div>
   </div>
@@ -127,15 +132,16 @@ const FEE = 0.00055;                                        // Bybit 非 VIP 合
 // S、Z：{ b: [[價, 顆], ...], a: [[價, 顆], ...] }，買賣盤各自由好到差；N：每條腿名目 USDT；fee：吃單費率
 // 回傳兩個方向 A（做多 STG / 做空 ZRO）與 B（做空 STG / 做多 ZRO）的試算；訂單簿吃不完 N 時該方向回傳 null
 const DEPTH_PCT = 0.001;                                    // 流動性看中間價 ±0.1% 內的掛單
-function vwap(side, N) {                                    // 市價單沿訂單簿吃到名目 N 的成交均價，吃不完回傳 null
+function fill(side, N) {                                    // 市價單沿訂單簿吃到名目 N：回傳成交均價與最後吃到的價格，吃不完回傳 null
   let left = N, qty = 0;
   for (const [p, q] of side) {
     const take = Math.min(left, p * q);
     qty += take / p; left -= take;
-    if (left <= 1e-9) return N / qty;
+    if (left <= 1e-9) return { avg: N / qty, worst: p };
   }
   return null;
 }
+const vwap = (side, N) => { const f = fill(side, N); return f && f.avg; };
 const depthNear = (side, mid) => side.filter(([p]) => Math.abs(p / mid - 1) <= DEPTH_PCT + 1e-12).reduce((t, [p, q]) => t + p * q, 0);
 function arbCalc(S, Z, N, fee) {
   const mid = (o) => (o.b[0][0] + o.a[0][0]) / 2;
@@ -181,9 +187,14 @@ function renderArb() {
   const { S, Z, sFr, zFr, zIv } = arbData, r = arbCalc(S, Z, N, FEE);
   $("arbMeta").textContent = `　中間價溢價 ${pct(r.midPrem)}，ZRO 用 Bybit 合約；更新 ${new Date(arbData.t).toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}`;
   const d = r.depth, k$ = (v) => "$" + Math.round(v).toLocaleString("en-US");
-  for (const [k, x, dir, sDep, zDep] of [["a", r.A, 1, d.sAsk, d.zBid], ["b", r.B, -1, d.sBid, d.zAsk]]) {
-    const cap = Math.min(sDep, zDep);
-    $(k + "Cap").innerHTML = `STG ${k$(sDep)} / ZRO ${k$(zDep)}` + (N > cap ? `<br><span class="warn">名目超過 ±0.1% 深度，滑價會更大</span>` : "");
+  const mS = (S.b[0][0] + S.a[0][0]) / 2, mZ = (Z.b[0][0] + Z.a[0][0]) / 2;
+  $("slipBody").innerHTML = [["STG 買進", S.a, mS, 5, d.sAsk], ["STG 賣出", S.b, mS, 5, d.sBid], ["ZRO 買進", Z.a, mZ, 4, d.zAsk], ["ZRO 賣出", Z.b, mZ, 4, d.zBid]].map(([name, side, m, dp, dep]) => {
+    const f = fill(side, N), depCell = `<td>${k$(dep)}${N > dep ? ' <span class="warn">名目超過</span>' : ""}</td>`;
+    if (!f) return `<tr><td>${name}</td><td colspan="4"><span class="warn">訂單簿前 500 檔吃不完 ${k$(N)}</span></td>${depCell}</tr>`;
+    const slip = (f.avg / m - 1) * 100, worst = (f.worst / m - 1) * 100;
+    return `<tr><td>${name}</td><td>${f.avg.toFixed(dp)}</td><td><b class="${Math.abs(slip) >= 0.5 ? "down" : ""}">${pct(slip)}</b></td><td>${f.worst.toFixed(dp)}</td><td>${pct(worst)}</td>${depCell}</tr>`;
+  }).join("");
+  for (const [k, x, dir] of [["a", r.A, 1], ["b", r.B, -1]]) {
     if (!x) {                                                // 訂單簿吃不完名目
       for (const c of ["Px", "Prem", "Gross", "Fee", "Net", "Roi", "Fund"]) $(k + c).textContent = "-";
       $(k + "Px").innerHTML = `<span class="warn">訂單簿前 500 檔吃不完 ${k$(N)}</span>`;
