@@ -38,6 +38,8 @@
     <div class="sep"></div>
     <div class="grp" id="rngs"></div>
     <div class="sep"></div>
+    <div class="grp" id="srcs"><button data-src="binance">ZRO 幣安現貨</button><button data-src="bybit">ZRO Bybit 現貨</button></div>
+    <div class="sep"></div>
     <div class="grp"><button id="logBtn" class="on">價格對數座標</button></div>
     <div class="cards">
       <div class="card"><div class="k">最新溢價</div><div class="v" id="cNow">-</div><div class="s" id="cNowS"> </div></div>
@@ -50,7 +52,7 @@
   <div id="wrap"><div id="chart"></div><div id="legend"></div></div>
   <div class="foot">
     <span><span class="dot" id="dot"></span><span id="fLoad">載入中</span></span>
-    <span>溢價 = STG / (0.08634 x ZRO) - 1，幣安現貨。K 線的開收盤用同根開收盤價算，高低點用 STG 最高最低價除以該根 ZRO 收盤價，是近似值。時間為 UTC+8，K 線切日依幣安（UTC）</span>
+    <span>溢價 = STG / (0.08634 x ZRO) - 1。STG 全段用 Bybit USDT 永續合約（幣安現貨 2026-10-06 已下架），ZRO 用所選交易所現貨，成交額與資金費率也來自 Bybit 合約。K 線的開收盤用同根開收盤價算，高低點用 STG 最高最低價除以該根 ZRO 收盤價，是近似值。時間為 UTC+8，K 線切日依 UTC</span>
   </div>
 </div>
 
@@ -61,6 +63,8 @@ const START = Date.UTC(2025, 7, 1);                        // 2025-08-01
 const IVS = { "1h": 3600000, "4h": 14400000, "1d": 86400000, "1w": 604800000 };
 const RANGES = [["1M", 30], ["3M", 91], ["6M", 182], ["全部", 0]];
 const HOSTS = ["https://api.binance.com", "https://data-api.binance.vision"];
+const BYBIT = "https://api.bybit.com/v5/market";
+const BYBIT_IV = { "1h": "60", "4h": "240", "1d": "D", "1w": "W" };
 const EVENTS = [                                           // 只放已查到來源的日期（UTC+8）
   ["2025-08-11", "LayerZero 提出併購"],
   ["2025-08-24", "DAO 通過"],
@@ -68,8 +72,9 @@ const EVENTS = [                                           // 只放已查到來
 ];
 const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } };
-let iv = store("lt_iv") || "1d", rng = store("lt_rng") || "全部", logOn = store("lt_log") !== "0";
+let iv = store("lt_iv") || "1d", rng = store("lt_rng") || "全部", logOn = store("lt_log") !== "0", src = store("lt_zsrc") || "binance";
 if (!IVS[iv]) iv = "1d";
+if (!["binance", "bybit"].includes(src)) src = "binance";
 if (!RANGES.some((r) => r[0] === rng)) rng = "全部";
 const dbg = { bars: [], iv: "", loads: 0 };
 
@@ -97,44 +102,58 @@ const markers = LightweightCharts.createSeriesMarkers ? LightweightCharts.create
 function applyLog() { try { stgS.priceScale().applyOptions({ mode: logOn ? LightweightCharts.PriceScaleMode.Logarithmic : LightweightCharts.PriceScaleMode.Normal }); } catch (e) {} $("logBtn").className = logOn ? "on" : ""; }
 
 // ---------- 資料 ----------
-async function getK(sym, interval, start) {
+// ex: "binance"（現貨）或 "bybit"；Bybit 的 STGUSDT 走永續合約 linear，其餘走 spot。從 start 往後翻頁到現在
+async function getK(ex, sym, interval, start) {
   const out = new Map();
   let cur = start, err = null;
+  const bu = `${BYBIT}/kline?category=${sym === "STGUSDT" ? "linear" : "spot"}&symbol=${sym}&interval=${BYBIT_IV[interval]}&limit=1000`;
+  const urls = ex === "bybit"
+    ? [bu, bu]                                             // 實測同時翻多組頁時 Bybit 偶爾回 internal error，重試一次
+    : HOSTS.map((h) => `${h}/api/v3/klines?symbol=${sym}&interval=${interval}&limit=1000`);
   while (cur <= Date.now()) {
     let data = null;
-    for (const h of HOSTS) {
-      try { const r = await fetch(`${h}/api/v3/klines?symbol=${sym}&interval=${interval}&startTime=${cur}&limit=1000`); if (!r.ok) throw new Error(r.status); data = await r.json(); break; } catch (e) { err = e; }
+    for (const u of urls) {
+      try {
+        const r = await fetch(`${u}&${ex === "bybit" ? "start" : "startTime"}=${cur}`); if (!r.ok) throw new Error(r.status);
+        const j = await r.json();
+        if (ex === "bybit" && j.retCode !== 0) throw new Error(j.retMsg);
+        data = ex === "bybit" ? j.result.list.slice().reverse() : j;   // Bybit 給 start 時回傳 start 之後最早的 1000 根，新到舊排列
+        break;
+      } catch (e) { err = e; console.warn("[warn] K 線請求失敗，1 秒後換下一個", sym, cur, e); await new Promise((r) => setTimeout(r, 1000)); }
     }
     if (!data) throw err;
     if (!data.length) break;
-    for (const k of data) out.set(Math.floor(k[0] / 1000), { o: +k[1], h: +k[2], l: +k[3], c: +k[4], qv: +k[7] });
-    cur = data[data.length - 1][0] + IVS[interval];
+    // 成交額：幣安在索引 7，Bybit turnover 在索引 6
+    for (const k of data) out.set(Math.floor(+k[0] / 1000), { o: +k[1], h: +k[2], l: +k[3], c: +k[4], qv: +k[ex === "bybit" ? 6 : 7] });
+    cur = +data[data.length - 1][0] + IVS[interval];
     if (data.length < 1000) break;
   }
   return out;
 }
-// 已結算的資金費率歷史（結算間隔會變：8 小時、1 小時、4 小時），失敗時回傳空陣列不影響主圖
+// Bybit 已結算資金費率歷史：單次最多 200 筆，從現在用 endTime 往回翻到 START。失敗時回傳已抓到的部分，不影響主圖
 async function getFunding() {
-  const F = "https://fapi.binance.com", out = [];
+  const out = [];
   try {
-    let cur = START;
-    while (true) {
-      const r = await fetch(`${F}/fapi/v1/fundingRate?symbol=STGUSDT&startTime=${cur}&limit=1000`);
+    let end = Date.now();
+    while (end > START) {
+      const r = await fetch(`${BYBIT}/funding/history?category=linear&symbol=STGUSDT&endTime=${end}&limit=200`);
       if (!r.ok) throw new Error(r.status);
-      const d = await r.json();
+      const j = await r.json();
+      if (j.retCode !== 0) throw new Error(j.retMsg);
+      const d = j.result.list;
       if (!d.length) break;
-      for (const x of d) { const v = +x.fundingRate * 100; out.push({ time: Math.floor(x.fundingTime / 1000) + SHIFT, value: v, color: v >= 0 ? "rgba(38,166,154,.8)" : "rgba(239,83,80,.9)" }); }
-      cur = d[d.length - 1].fundingTime + 1;
-      if (d.length < 1000) break;
+      for (const x of d) { const v = +x.fundingRate * 100; out.push({ time: Math.floor(+x.fundingRateTimestamp / 1000) + SHIFT, value: v, color: v >= 0 ? "rgba(38,166,154,.8)" : "rgba(239,83,80,.9)" }); }
+      end = +d[d.length - 1].fundingRateTimestamp - 1;    // 新到舊，最後一筆最舊
+      if (d.length < 200) break;
     }
   } catch (e) { console.warn("[warn] 資金費率歷史失敗", e); }
   const seen = new Set();
-  return out.filter((x) => (seen.has(x.time) ? false : seen.add(x.time))).sort((a, b) => a.time - b.time);
+  return out.filter((x) => x.time >= START / 1000 + SHIFT && (seen.has(x.time) ? false : seen.add(x.time))).sort((a, b) => a.time - b.time);
 }
-async function refreshFunding() {                          // 即時預估費率，與幣安前端 Funding / Countdown 同一個值
+async function refreshFunding() {                          // 即時預估費率，與 Bybit 前端 Funding / Countdown 同一個值
   try {
-    const r = await fetch("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=STGUSDT"), p = await r.json();
-    const v = +p.lastFundingRate * 100, ms = p.nextFundingTime - Date.now();
+    const r = await fetch(`${BYBIT}/tickers?category=linear&symbol=STGUSDT`), p = (await r.json()).result.list[0];
+    const v = +p.fundingRate * 100, ms = +p.nextFundingTime - Date.now();
     $("cFr").textContent = (v >= 0 ? "+" : "") + v.toFixed(4) + "%"; $("cFr").className = "v " + (v >= 0 ? "up" : "down");
     $("cFrS").textContent = ms > 0 ? `${Math.floor(ms / 3600000)} 小時 ${Math.floor((ms % 3600000) / 60000)} 分後結算` : "結算中";
   } catch (e) { console.warn("[warn] 即時資金費率失敗", e); }
@@ -166,24 +185,27 @@ async function load() {
   const my = ++dbg.loads;
   $("dot").className = "dot"; $("fLoad").textContent = "載入中";
   let s, z, fr;
-  try { [s, z, fr] = await Promise.all([getK("STGUSDT", iv, START), getK("ZROUSDT", iv, START), getFunding()]); }
+  try { [s, z, fr] = await Promise.all([getK("bybit", "STGUSDT", iv, START), getK(src, "ZROUSDT", iv, START), getFunding()]); }
   catch (e) { console.error(e); $("dot").className = "dot bad"; $("fLoad").textContent = "載入失敗：" + e; return; }
   if (my !== dbg.loads) return;
   bars = [...s.keys()].filter((t) => z.has(t)).sort((a, b) => a - b).map((t) => mkBar(t, s.get(t), z.get(t)));
-  dbg.bars = bars; dbg.iv = iv;
+  dbg.bars = bars; dbg.iv = iv; dbg.src = src;
   setAll(bars); fundS.setData(fr); dbg.funding = fr; setMarkers(bars); applyRange(); refreshCards(); refreshFunding();
   $("dot").className = "dot ok"; $("fLoad").textContent = `${iv} 線，${bars.length} 根，最後更新 ${new Date().toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}`;
   console.log(`[load] ${iv} ${bars.length} 根`);
 }
 async function refreshTail() {
-  if (!bars.length) return;
+  if (!bars.length || dbg.iv !== iv || dbg.src !== src) return;   // 切換週期或來源後、新資料還沒載完，不要把新週期的尾端寫進舊 bars
+  const my = dbg.loads;
   try {
     const from = Date.now() - IVS[iv] * 3;
-    const [s, z] = await Promise.all([getK("STGUSDT", iv, from), getK("ZROUSDT", iv, from)]);
+    const [s, z] = await Promise.all([getK("bybit", "STGUSDT", iv, from), getK(src, "ZROUSDT", iv, from)]);
+    if (my !== dbg.loads) return;                          // 等待期間又切換過，丟掉
     for (const t of [...s.keys()].sort((a, b) => a - b)) {
       if (!z.has(t)) continue;
-      const b = mkBar(t, s.get(t), z.get(t)), i = bars.findIndex((x) => x.time === b.time);
-      if (i >= 0) bars[i] = b; else if (b.time > bars[bars.length - 1].time) bars.push(b); else continue;
+      const b = mkBar(t, s.get(t), z.get(t)), lastT = bars[bars.length - 1].time;
+      if (b.time < lastT) continue;                         // 圖表庫只能更新最後一根，較舊的已收盤不用動
+      if (b.time === lastT) bars[bars.length - 1] = b; else bars.push(b);
       premS.update({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close });
       stgS.update({ time: b.time, value: b.stg }); fairS.update({ time: b.time, value: b.fair });
       volS.update({ time: b.time, value: b.qv, color: b.close >= b.open ? "rgba(38,166,154,.5)" : "rgba(239,83,80,.5)" });
@@ -232,6 +254,10 @@ function buildBar() {
   $("ivs").innerHTML = ""; $("rngs").innerHTML = "";
   for (const k of Object.keys(IVS)) { const b = document.createElement("button"); b.textContent = k; b.className = k === iv ? "on" : ""; b.onclick = () => switchInterval(k); $("ivs").appendChild(b); }
   for (const [k] of RANGES) { const b = document.createElement("button"); b.textContent = k; b.className = k === rng ? "on" : ""; b.onclick = () => { rng = k; store("lt_rng", k); buildBar(); applyRange(); refreshCards(); }; $("rngs").appendChild(b); }
+  document.querySelectorAll("#srcs button").forEach((b) => {
+    b.className = b.dataset.src === src ? "on" : "";
+    b.onclick = () => { src = b.dataset.src; store("lt_zsrc", src); buildBar(); load(); };
+  });
 }
 function switchInterval(k) { iv = k; store("lt_iv", k); buildBar(); load(); }
 $("logBtn").onclick = () => { logOn = !logOn; store("lt_log", logOn ? "1" : "0"); applyLog(); };

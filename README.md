@@ -1,19 +1,21 @@
 # stg-premium-chart
 
-Four static web pages that track the STG token against its fixed ZRO conversion ratio of 1 STG = 0.08634 ZRO, using Binance public market data. There is no backend and no API key. The browser calls Binance directly, so the charts keep updating while the tab is open.
+Four static web pages that track the STG token against its fixed ZRO conversion ratio of 1 STG = 0.08634 ZRO, using public market data from Bybit and Binance. There is no backend and no API key. The browser calls the exchanges directly, so the charts keep updating while the tab is open.
+
+Data sources since October 2026: Binance settled its STGUSDT perpetual on 2026-09-24 and delisted STG spot on 2026-10-06, so STG now comes from the Bybit STGUSDT perpetual. Bybit has no STG spot market. ZRO spot can come from either Binance or Bybit.
 
 ![index.html: STG premium over fair value, 1h candles](docs/demo.png)
 
 ## Pages
 
-- `index.html`: premium candles of STG over its fair value, which is 0.08634 times the ZRO spot price, with a price panel below. Choose Binance spot or the USDT-M perpetual, and 1s, 1m, 5m, 15m or 1h candles. Binance has no 1s candles for the perpetual, so that option is disabled there.
-- `settlement.html`: settlement price calculator for the Binance STGUSDT perpetual delisting. Binance's delisting FAQ defines the settlement price as the average of the per-second index price over the last 30 minutes, 1,800 samples in total. The page draws the index price and a rolling 30-minute average. Inside the window it also draws a running average and a projected settlement price.
+- `index.html`: premium candles of the Bybit STG perpetual over its fair value, which is 0.08634 times the ZRO spot price, with a price panel below. Choose Binance or Bybit for ZRO, and 1m, 5m, 15m or 1h candles. It polls both exchanges every 2 seconds.
+- `settlement.html`: settlement price calculator for the Binance STGUSDT perpetual delisting, kept as a record of the 2026-09-24 settlement. It still reads Binance. Binance's delisting FAQ defines the settlement price as the average of the per-second index price over the last 30 minutes, 1,800 samples in total. The page draws the index price and a rolling 30-minute average. Inside the window it also draws a running average and a projected settlement price.
 
-- `derivatives.html`: positioning charts for the STGUSDT perpetual. Panels for price, the spot premium over the perpetual, open interest, three long/short ratios, the taker buy/sell ratio and the funding rate. It refreshes every 30 seconds. Binance keeps this data for about 30 days.
+- `derivatives.html`: positioning charts for the Bybit STGUSDT perpetual. Panels for price, the premium over fair value with one line per ZRO source, open interest in USDT, the long/short account ratio and the funding rate. It refreshes every 30 seconds. Bybit doesn't publish top-trader or taker ratios, so those panels from the Binance version are gone.
 
-  ![derivatives.html: price, spot premium over the perpetual, open interest, long/short ratios, taker ratio and funding rate](docs/derivatives.png)
+  ![derivatives.html: perpetual price, premium over fair value for both ZRO sources, open interest, long/short account ratio and funding rate](docs/derivatives.png)
 
-- `longterm.html`: the long view since 2025-08-01. Premium candles over the fixed ratio, STG price against fair value on a log scale, volume, and the settled funding rate history. Choose 1h, 4h, 1d or 1w candles and a 1M, 3M, 6M or full range. Event markers show the acquisition proposal, the DAO vote and the 2026-06-12 spike.
+- `longterm.html`: the long view since 2025-08-01. Premium candles over the fixed ratio, STG price against fair value on a log scale, volume, and the settled funding rate history, all from the Bybit perpetual. Choose Binance or Bybit for ZRO, 1h, 4h, 1d or 1w candles, and a 1M, 3M, 6M or full range. Event markers show the acquisition proposal, the DAO vote and the 2026-06-12 spike.
 
 ## Use
 
@@ -25,7 +27,8 @@ Open a page in a browser, or serve the folder with any static host such as GitHu
 - The delisting window in `settlement.html` defaults to 2026-09-24 16:30 to 17:00 UTC+8. Change `WS_ISO` in the file or use `?start=`.
 - Seconds before the page opened are filled from 1-minute index prices, so they are approximate. The status panel shows how many real per-second samples were collected.
 - Keep the settlement page in a foreground tab. Browsers slow timers in background tabs.
-- Binance blocks some regions. If the API is unreachable from your network, the charts stay empty.
+- Open interest is the Bybit `openInterest` count times the perpetual close of the same candle, the same basis as Bybit's `openInterestValue`.
+- Binance and Bybit block some regions. If an API is unreachable from your network, the charts that need it stay empty.
 - Charts use [Lightweight Charts](https://github.com/tradingview/lightweight-charts) 5.0.8 from jsDelivr, pinned with a Subresource Integrity hash.
 
 Nothing here is financial advice.

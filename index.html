@@ -36,11 +36,11 @@
   <div class="bar">
     <div class="grp" id="ivs"></div>
     <div class="grp" id="srcs">
-      <button data-src="spot" class="on">STG 現貨</button>
-      <button data-src="perp">STG 合約</button>
+      <button data-src="binance" class="on">ZRO 幣安現貨</button>
+      <button data-src="bybit">ZRO Bybit 現貨</button>
     </div>
     <div class="stat">
-      <span class="dim">STG<b id="sStg">-</b></span>
+      <span class="dim">STG 合約<b id="sStg">-</b></span>
       <span class="dim">ZRO<b id="sZro">-</b></span>
       <span class="dim">合理價<b id="sFair">-</b></span>
       <span class="dim">價差<b id="sDiff">-</b></span>
@@ -51,29 +51,24 @@
   <div class="foot">
     <span><span class="dot" id="dStg"></span>STG 連線</span>
     <span><span class="dot" id="dZro"></span>ZRO 連線</span>
-    <span id="cd1">-</span>
-    <span id="cd2">-</span>
-    <span>溢價 = STG / (0.08634 x ZRO) - 1。高低點以該根 ZRO 收盤價為分母，屬近似值。時間軸為 UTC+8</span>
+    <span>STG 為 Bybit USDT 永續合約（幣安現貨 2026-10-06 已下架）。溢價 = STG / (0.08634 x ZRO) - 1。高低點以該根 ZRO 收盤價為分母，屬近似值。時間軸為 UTC+8</span>
   </div>
 </div>
 
 <script>
 const R = 0.08634;
 const SHIFT = 8 * 3600; // 圖表時間軸以 UTC+8 顯示（把 unix 秒平移 8 小時）
-const IVS = ["1s", "1m", "5m", "15m", "1h"];
+const IVS = ["1m", "5m", "15m", "1h"];
+const BYBIT_IV = { "1m": "1", "5m": "5", "15m": "15", "1h": "60" };
 const SPOT_REST = ["https://api.binance.com", "https://data-api.binance.vision"];
-const PERP_REST = ["https://fapi.binance.com"];
-const DEADLINES = [
-  ["合約結算倒數", new Date("2026-09-24T17:00:00+08:00")],
-  ["現貨下架倒數", new Date("2026-10-06T11:00:00+08:00")],
-];
+const BYBIT = "https://api.bybit.com/v5/market";
 const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } };
 
 let interval = store("iv") || "1m";
-let src = store("src") || "spot";
+let src = store("zsrc") || "binance";   // ZRO 現貨來源；STG 固定用 Bybit 合約
 if (!IVS.includes(interval)) interval = "1m";
-if (src === "perp" && interval === "1s") interval = "1m";
+if (!["binance", "bybit"].includes(src)) src = "binance";
 
 // ---------- 圖表 ----------
 const chart = LightweightCharts.createChart($("chart"), {
@@ -98,22 +93,26 @@ try { chart.panes()[1].setHeight(180); } catch (e) {}
 
 // ---------- 資料 ----------
 let stg = new Map(), zro = new Map(), zroTimes = [];
-let socks = {};
-let gen = 0; // 切換週期或來源時遞增，舊連線的回呼自動失效
+let gen = 0; // 切換週期或來源時遞增，舊輪詢自動失效
 
-const T = (ms) => Math.floor(ms / 1000) + SHIFT;
+const T = (ms) => Math.floor(+ms / 1000) + SHIFT;
 const parse = (k) => ({ t: T(k[0]), o: +k[1], h: +k[2], l: +k[3], c: +k[4] });
 
-async function getKlines(hosts, path, sym) {
+// ex: "binance"（現貨）或 "bybit"；Bybit 的 STGUSDT 走永續合約 linear，其餘走 spot。回傳依時間升冪
+async function getKlines(ex, sym, limit) {
   let err;
-  for (const h of hosts) {
-    const url = `${h}${path}?symbol=${sym}&interval=${interval}&limit=1000`;
+  const urls = ex === "bybit"
+    ? [`${BYBIT}/kline?category=${sym === "STGUSDT" ? "linear" : "spot"}&symbol=${sym}&interval=${BYBIT_IV[interval]}&limit=${limit}`]
+    : SPOT_REST.map((h) => `${h}/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`);
+  for (const url of urls) {
     try {
       const r = await fetch(url);
       if (!r.ok) throw new Error(r.status);
       const j = await r.json();
-      console.log(`[${sym}] ${j.length} 根 <- ${url}`);
-      return j.map(parse);
+      if (ex === "bybit" && j.retCode !== 0) throw new Error(j.retMsg);
+      const rows = ex === "bybit" ? j.result.list.slice().reverse() : j;   // Bybit 回傳新到舊
+      if (limit > 2) console.log(`[${sym}] ${rows.length} 根 <- ${url}`);
+      return rows.map(parse);
     } catch (e) { err = e; console.warn("[warn]", url, e); }
   }
   throw err;
@@ -160,12 +159,9 @@ function setStats(t) {
 let lastT = 0;
 async function load() {
   const my = ++gen;
-  closeSocks();
   ["dStg", "dZro"].forEach((d) => ($(d).className = "dot"));
-  const stgHosts = src === "perp" ? PERP_REST : SPOT_REST;
-  const stgPath = src === "perp" ? "/fapi/v1/klines" : "/api/v3/klines";
   let a, b;
-  try { [a, b] = await Promise.all([getKlines(stgHosts, stgPath, "STGUSDT"), getKlines(SPOT_REST, "/api/v3/klines", "ZROUSDT")]); }
+  try { [a, b] = await Promise.all([getKlines("bybit", "STGUSDT", 1000), getKlines(src, "ZROUSDT", 1000)]); }
   catch (e) { console.error(e); $("legend").textContent = "載入歷史資料失敗：" + e; return; }
   if (my !== gen) return;
   stg = new Map(a.map((x) => [x.t, x]));
@@ -177,43 +173,28 @@ async function load() {
   chart.timeScale().fitContent();
   lastT = a.length ? a[a.length - 1].t : 0;
   setStats(lastT);
-  console.log(`已畫 ${pd.length} 根溢價 K 線，週期 ${interval}，來源 ${src}`);
-  if (src === "perp") pollPerp(my); // 實測合約 WebSocket 連上但無推送，改 REST 每 2 秒輪詢
-  else openSock("stg", "wss://stream.binance.com:9443/ws/stgusdt@kline_" + interval, "dStg", my);
-  openSock("zro", "wss://stream.binance.com:9443/ws/zrousdt@kline_" + interval, "dZro", my);
+  console.log(`已畫 ${pd.length} 根溢價 K 線，週期 ${interval}，ZRO 來源 ${src}`);
+  poll(my);
 }
 
-function openSock(name, url, dot, my) {
-  if (my !== gen) return;
-  const ws = new WebSocket(url);
-  socks[name] = ws;
-  ws.onopen = () => ($(dot).className = "dot ok");
-  ws.onclose = () => { $(dot).className = "dot bad"; if (my === gen) setTimeout(() => openSock(name, url, dot, my), 2000); };
-  ws.onerror = () => ws.close();
-  ws.onmessage = (ev) => {
-    if (my !== gen) return;
-    const k = JSON.parse(ev.data).k; if (!k) return;
-    const bar = { t: T(k.t), o: +k.o, h: +k.h, l: +k.l, c: +k.c };
-    if (name === "stg") { stg.set(bar.t, bar); lastT = Math.max(lastT, bar.t); }
-    else { if (!zro.has(bar.t)) zroTimes.push(bar.t); zro.set(bar.t, bar); }
-    render(bar.t, false);
-    setStats(lastT);
-  };
-}
-async function pollPerp(my) {
+// ponytail: 兩邊都用 REST 每 2 秒輪詢（各 2 根），不開 WebSocket；週期最細 1 分鐘，2 秒足夠
+async function poll(my) {
   while (my === gen) {
-    try {
-      const r = await fetch(`${PERP_REST[0]}/fapi/v1/klines?symbol=STGUSDT&interval=${interval}&limit=2`);
-      const j = await r.json();
-      if (my !== gen) return;
-      for (const k of j) { const bar = parse(k); stg.set(bar.t, bar); lastT = Math.max(lastT, bar.t); render(bar.t, false); }
-      setStats(lastT);
-      $("dStg").className = "dot ok";
-    } catch (e) { $("dStg").className = "dot bad"; console.warn("[warn] 合約輪詢失敗", e); }
     await new Promise((res) => setTimeout(res, 2000));
+    const [a, b] = await Promise.allSettled([getKlines("bybit", "STGUSDT", 2), getKlines(src, "ZROUSDT", 2)]);
+    if (my !== gen) return;
+    $("dStg").className = "dot " + (a.status === "fulfilled" ? "ok" : "bad");
+    $("dZro").className = "dot " + (b.status === "fulfilled" ? "ok" : "bad");
+    const ts = new Set();
+    if (b.status === "fulfilled") for (const bar of b.value) {
+      if (!zro.has(bar.t)) { zroTimes.push(bar.t); if (bar.t < zroTimes[zroTimes.length - 2]) zroTimes.sort((x, y) => x - y); }  // 補到較舊的洞時保持排序，zroAt 用二分搜尋
+      zro.set(bar.t, bar); ts.add(bar.t);
+    }
+    if (a.status === "fulfilled") for (const bar of a.value) { stg.set(bar.t, bar); lastT = Math.max(lastT, bar.t); ts.add(bar.t); }
+    for (const t of [...ts].sort((x, y) => x - y)) render(t, false);
+    setStats(lastT);
   }
 }
-function closeSocks() { for (const k in socks) { socks[k].onclose = null; try { socks[k].close(); } catch (e) {} } socks = {}; }
 
 // ---------- 控制列 ----------
 function buildBar() {
@@ -222,15 +203,13 @@ function buildBar() {
     const b = document.createElement("button");
     b.textContent = iv; b.dataset.iv = iv;
     b.className = iv === interval ? "on" : "";
-    if (iv === "1s" && src === "perp") b.disabled = true; // 合約沒有 1 秒線
     b.onclick = () => { interval = iv; store("iv", iv); buildBar(); load(); };
     $("ivs").appendChild(b);
   }
   document.querySelectorAll("#srcs button").forEach((b) => {
     b.className = b.dataset.src === src ? "on" : "";
     b.onclick = () => {
-      src = b.dataset.src; store("src", src);
-      if (src === "perp" && interval === "1s") { interval = "1m"; store("iv", interval); }
+      src = b.dataset.src; store("zsrc", src);
       buildBar(); load();
     };
   });
@@ -247,18 +226,6 @@ chart.subscribeCrosshairMove((p) => {
   lg.innerHTML = `溢價 <span class="${cls}">開 ${f(d.open)} 高 ${f(d.high)} 低 ${f(d.low)} 收 ${f(d.close)}</span>` +
     (sv && fv ? `<br><span class="dim">STG ${sv.value.toFixed(5)}　合理價 ${fv.value.toFixed(5)}</span>` : "");
 });
-
-// ---------- 倒數 ----------
-function tickCountdown() {
-  DEADLINES.forEach(([name, dt], i) => {
-    const ms = dt - Date.now();
-    const el = $("cd" + (i + 1));
-    if (ms <= 0) { el.textContent = name + "：已到"; return; }
-    const s = Math.floor(ms / 1000), dd = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
-    el.textContent = `${name}：${dd}天 ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
-  });
-}
-setInterval(tickCountdown, 1000); tickCountdown();
 
 buildBar();
 load();
