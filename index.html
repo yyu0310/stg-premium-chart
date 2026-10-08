@@ -57,7 +57,8 @@
     <h2>套利試算</h2>
     <ul class="note">
       <li>進場：兩腿都下在 Bybit 合約，市價單沿訂單簿吃到輸入的名目，用成交均價計算</li>
-      <li>出場：假設 ZRO 中間價不變、STG 回到合理價，滑價比照現在的訂單簿</li>
+      <li>結算前平倉：假設 ZRO 中間價不變、STG 回到合理價，滑價比照現在的訂單簿</li>
+      <li>抱到結算：STG 腿以指數價結算，先用現在的指數價代入，不算滑價與手續費；ZRO 腿自己市價平倉</li>
       <li>滑價：市價單成交均價偏離中間價多少，最差成交價是吃到的最後一檔</li>
       <li>流動性：中間價 ±0.1% 內的掛單金額，名目超過時滑價會明顯變大</li>
       <li>手續費：非 VIP 吃單 0.055%，每腿進出各一次，共 4 次</li>
@@ -81,10 +82,7 @@
     </table></div>
     <div class="tw"><table>
       <thead><tr><th>策略</th><th>進場均價 STG / ZRO</th><th>進場溢價</th><th>毛利</th><th>手續費</th><th>淨利</th><th>1 倍本金報酬</th><th>每次 STG 結算資金費</th></tr></thead>
-      <tbody>
-        <tr><td>STG 折價策略<br><span class="note">做多 STG / 做空 ZRO</span></td><td id="aPx">-</td><td id="aPrem">-</td><td id="aGross">-</td><td id="aFee">-</td><td id="aNet">-</td><td id="aRoi">-</td><td id="aFund">-</td></tr>
-        <tr><td>STG 溢價策略<br><span class="note">做空 STG / 做多 ZRO</span></td><td id="bPx">-</td><td id="bPrem">-</td><td id="bGross">-</td><td id="bFee">-</td><td id="bNet">-</td><td id="bRoi">-</td><td id="bFund">-</td></tr>
-      </tbody>
+      <tbody id="stratBody"></tbody>
     </table></div>
   </div>
 
@@ -151,14 +149,16 @@ function fill(side, N) {                                    // 市價單沿訂�
 }
 const vwap = (side, N) => { const f = fill(side, N); return f && f.avg; };
 const depthNear = (side, mid) => side.filter(([p]) => Math.abs(p / mid - 1) <= DEPTH_PCT + 1e-12).reduce((t, [p, q]) => t + p * q, 0);
-function arbCalc(S, Z, N, fee) {
+// idx：STG 指數價，抱到結算情境用它當結算價；沒給時抱到結算的兩列回傳 null
+function arbCalc(S, Z, N, fee, idx) {
   const mid = (o) => (o.b[0][0] + o.a[0][0]) / 2;
   const mS = mid(S), mZ = mid(Z), fair = R * mZ;            // 出場時 STG 中間價回到合理價，ZRO 中間價不變
-  const run = (sEntry, zEntry, sExit, zExit, sDir) => {     // sDir 1：做多 STG；-1：做空 STG（ZRO 腿方向相反）
+  // sDir 1：做多 STG；-1：做空 STG（ZRO 腿方向相反）。sExitFee false：STG 腿由交易所結算平倉，不收吃單費
+  const run = (sEntry, zEntry, sExit, zExit, sDir, sExitFee = true) => {
     if ([sEntry, zEntry, sExit, zExit].some((x) => x == null)) return null;
     const qS = N / sEntry, qZ = N / zEntry;
     const gross = sDir * (qS * (sExit - sEntry) - qZ * (zExit - zEntry));
-    const fees = fee * (2 * N + qS * sExit + qZ * zExit);
+    const fees = fee * (2 * N + (sExitFee ? qS * sExit : 0) + qZ * zExit);
     const net = gross - fees;
     return { sEntry, zEntry, sSlip: (sEntry / mS - 1) * 100, zSlip: (zEntry / mZ - 1) * 100,
       entryPrem: (sEntry / (R * zEntry) - 1) * 100, gross, fees, net, netPct: net / N * 100, roi1x: net / (2 * N) * 100 };
@@ -166,8 +166,11 @@ function arbCalc(S, Z, N, fee) {
   const exitS = (side) => { const v = vwap(side, N); return v == null ? null : fair * (v / mS); };   // 出場滑價比照現在的訂單簿
   const A = run(vwap(S.a, N), vwap(Z.b, N), exitS(S.b), vwap(Z.a, N), 1);   // 買 STG、賣 ZRO；出場反向
   const B = run(vwap(S.b, N), vwap(Z.a, N), exitS(S.a), vwap(Z.b, N), -1);
+  // 抱到結算：STG 腿以指數價結算、無滑價無手續費；ZRO 腿自己市價平倉，中間價不變
+  const A2 = idx ? run(vwap(S.a, N), vwap(Z.b, N), idx, vwap(Z.a, N), 1, false) : null;
+  const B2 = idx ? run(vwap(S.b, N), vwap(Z.a, N), idx, vwap(Z.b, N), -1, false) : null;
   const depth = { sBid: depthNear(S.b, mS), sAsk: depthNear(S.a, mS), zBid: depthNear(Z.b, mZ), zAsk: depthNear(Z.a, mZ) };
-  return { A, B, depth, midPrem: (mS / fair - 1) * 100 };
+  return { A, B, A2, B2, depth, midPrem: (mS / fair - 1) * 100 };
 }
 // 容量：滑價不超過 slip（例 0.005）時，這一側最多能吃多少名目。dir 1 買進吃賣盤、-1 賣出吃買盤；整本都在範圍內就回傳整本金額
 function capacity(side, mid, slip, dir) {
@@ -180,11 +183,12 @@ function capacity(side, mid, slip, dir) {
   return lo;
 }
 // 策略倉位掃描：名目從 $50 每次乘 1.15 試到 $50 萬或訂單簿吃不完，回傳淨利最高的倉位與仍有淨利的最大倉位（格點近似）
-function sizeScan(S, Z, fee) {
-  const out = { A: { best: null, maxPos: null }, B: { best: null, maxPos: null } };
+function sizeScan(S, Z, fee, idx) {
+  const KEYS = ["A", "B", "A2", "B2"], out = {};
+  for (const k of KEYS) out[k] = { best: null, maxPos: null };
   for (let N = 50; N <= 500000; N *= 1.15) {
-    const r = arbCalc(S, Z, N, fee);
-    for (const k of ["A", "B"]) {
+    const r = arbCalc(S, Z, N, fee, idx);
+    for (const k of KEYS) {
       const x = r[k];
       if (!x) continue;
       if (x.net > 0) {
@@ -192,7 +196,7 @@ function sizeScan(S, Z, fee) {
         out[k].maxPos = N;
       }
     }
-    if (!r.A && !r.B) break;
+    if (KEYS.every((k) => !r[k])) break;
   }
   return out;
 }
@@ -210,7 +214,7 @@ async function fetchArb() {
     const [s, z, st, zt] = await Promise.all([
       bybit("/orderbook?category=linear&symbol=STGUSDT&limit=500"), bybit("/orderbook?category=linear&symbol=ZROUSDT&limit=500"),
       bybit("/tickers?category=linear&symbol=STGUSDT"), bybit("/tickers?category=linear&symbol=ZROUSDT")]);
-    arbData = { S: book(s), Z: book(z), sFr: +st.list[0].fundingRate, zFr: +zt.list[0].fundingRate, zIv: zt.list[0].fundingIntervalHour, t: Date.now() };
+    arbData = { S: book(s), Z: book(z), sFr: +st.list[0].fundingRate, idx: +st.list[0].indexPrice, zFr: +zt.list[0].fundingRate, zIv: zt.list[0].fundingIntervalHour, t: Date.now() };
     renderArb();
   } catch (e) { console.warn("[warn] 套利試算抓訂單簿失敗", e); $("arbMeta").textContent = "　訂單簿讀取失敗：" + e.message; }
 }
@@ -219,8 +223,8 @@ function renderArb() {
   if (!arbData) return;
   const N = +nIn.value;
   if (!(N > 0)) return;
-  const { S, Z, sFr, zFr, zIv } = arbData, r = arbCalc(S, Z, N, FEE);
-  $("arbMeta").textContent = `　中間價溢價 ${pct(r.midPrem)}，ZRO 用 Bybit 合約；更新 ${new Date(arbData.t).toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}`;
+  const { S, Z, sFr, zFr, zIv, idx } = arbData, r = arbCalc(S, Z, N, FEE, idx);
+  $("arbMeta").textContent = `　中間價溢價 ${pct(r.midPrem)}，ZRO 用 Bybit 合約；STG 指數 ${idx.toFixed(5)}；更新 ${new Date(arbData.t).toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}`;
   const d = r.depth, k$ = (v) => "$" + Math.round(v).toLocaleString("en-US");
   const mS = (S.b[0][0] + S.a[0][0]) / 2, mZ = (Z.b[0][0] + Z.a[0][0]) / 2;
   $("slipBody").innerHTML = [["STG 買進", S.a, mS, 5, d.sAsk], ["STG 賣出", S.b, mS, 5, d.sBid], ["ZRO 買進", Z.a, mZ, 4, d.zAsk], ["ZRO 賣出", Z.b, mZ, 4, d.zBid]].map(([name, side, m, dp, dep]) => {
@@ -232,25 +236,22 @@ function renderArb() {
   const SLIPS = [0.001, 0.0025, 0.005, 0.01];
   $("capBody").innerHTML = [["STG 買進", S.a, mS, 1], ["STG 賣出", S.b, mS, -1], ["ZRO 買進", Z.a, mZ, 1], ["ZRO 賣出", Z.b, mZ, -1]].map(([name, side, m, dir]) =>
     `<tr><td>${name}</td>${SLIPS.map((sl) => `<td>${k$(capacity(side, m, sl, dir))}</td>`).join("")}</tr>`).join("");
-  const sz = sizeScan(S, Z, FEE);
-  $("sizeBody").innerHTML = [["STG 折價策略", sz.A], ["STG 溢價策略", sz.B]].map(([name, v]) => v.best
+  const sz = sizeScan(S, Z, FEE, idx);
+  const ROWS = [["A", "STG 折價策略", "結算前平倉", 1], ["A2", "STG 折價策略", "抱到結算", 1], ["B", "STG 溢價策略", "結算前平倉", -1], ["B2", "STG 溢價策略", "抱到結算", -1]];
+  const label = (name, exit) => `${name}<br><span class="note">${exit}</span>`;
+  $("sizeBody").innerHTML = ROWS.map(([key, name, exit]) => [label(name, exit), sz[key]]).map(([name, v]) => v.best
     ? `<tr><td>${name}</td><td>${k$(v.best.N)}</td><td><b class="up">${usd(v.best.net)}</b><br>${pct(v.best.netPct)}</td><td>約 ${k$(v.maxPos)}</td></tr>`
     : `<tr><td>${name}</td><td colspan="3"><span class="note">目前無利可圖：價差扣掉手續費與滑價後，任何倉位都虧</span></td></tr>`).join("");
-  for (const [k, x, dir] of [["a", r.A, 1], ["b", r.B, -1]]) {
-    if (!x) {                                                // 訂單簿吃不完名目
-      for (const c of ["Px", "Prem", "Gross", "Fee", "Net", "Roi", "Fund"]) $(k + c).textContent = "-";
-      $(k + "Px").innerHTML = `<span class="warn">訂單簿前 500 檔吃不完 ${k$(N)}</span>`;
-      continue;
-    }
-    $(k + "Px").innerHTML = `${x.sEntry.toFixed(5)} / ${x.zEntry.toFixed(4)}<br><span class="note">滑價 STG ${pct(x.sSlip)} / ZRO ${pct(x.zSlip)}</span>`;
-    $(k + "Prem").textContent = pct(x.entryPrem);
-    $(k + "Gross").textContent = usd(x.gross);
-    $(k + "Fee").innerHTML = `-$${x.fees.toFixed(2)}<br><span class="note">本金 ${(x.fees / (2 * N) * 100).toFixed(3)}%</span>`;   // 1 倍槓桿本金 = 兩腿名目，4 次吃單約佔 0.11%
-    $(k + "Net").innerHTML = `<b class="${cls(x.net)}">${usd(x.net)}</b><br>${pct(x.netPct)}`;
-    $(k + "Roi").innerHTML = `<span class="${cls(x.roi1x)}">${pct(x.roi1x)}</span>`;
+  $("stratBody").innerHTML = ROWS.map(([key, name, exit, dir]) => {
+    const x = r[key], head = `<td>${label(name, exit)}</td>`;
+    if (!x) return `<tr>${head}<td colspan="7"><span class="warn">訂單簿前 500 檔吃不完 ${k$(N)}</span></td></tr>`;
     const f = -dir * sFr * N;                              // 費率為正時多方付、空方收
-    $(k + "Fund").innerHTML = `<span class="${cls(f)}">${usd(f)}</span><br><span class="note">ZRO 每 ${zIv} 小時 ${usd(dir * zFr * N)}</span>`;
-  }
+    return `<tr>${head}<td>${x.sEntry.toFixed(5)} / ${x.zEntry.toFixed(4)}<br><span class="note">滑價 STG ${pct(x.sSlip)} / ZRO ${pct(x.zSlip)}</span></td>` +
+      `<td>${pct(x.entryPrem)}</td><td>${usd(x.gross)}</td>` +
+      `<td>-$${x.fees.toFixed(2)}<br><span class="note">本金 ${(x.fees / (2 * N) * 100).toFixed(3)}%</span></td>` +
+      `<td><b class="${cls(x.net)}">${usd(x.net)}</b><br>${pct(x.netPct)}</td><td><span class="${cls(x.roi1x)}">${pct(x.roi1x)}</span></td>` +
+      `<td><span class="${cls(f)}">${usd(f)}</span><br><span class="note">ZRO 每 ${zIv} 小時 ${usd(dir * zFr * N)}</span></td></tr>`;
+  }).join("");
 }
 (async function loop() { const t0 = Date.now(); await fetchArb(); setTimeout(loop, Math.max(0, 1000 - (Date.now() - t0))); })();   // 抓完才排下一輪，最快每秒一次
 </script>
